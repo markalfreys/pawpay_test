@@ -33,7 +33,7 @@ export async function POST(request: NextRequest) {
     unknown
   >;
 
-  if (typeof fromId !== "string" || typeof toId !== "string") {
+  if (typeof fromId !== "string" || typeof toId !== "string" || fromId === toId) {
     return Response.json({ error: "invalid ids" }, { status: 400 });
   }
   if (typeof type !== "string" || !VALID_TYPES.includes(type as SignalType)) {
@@ -70,13 +70,18 @@ export async function POST(request: NextRequest) {
 
   // Busy transitions:
   // - accept: the connection is now active → mark BOTH peers busy.
-  // - decline/end: free both peers.
+  // - end: the connection (or pending request) is over → free both peers.
+  //   This used to happen on `decline` only, so after any real chat ended
+  //   both users stayed busy forever and every new request was auto-declined.
+  // - decline: no change. Nobody is busy *because of* a request that was never
+  //   accepted, and a client auto-declines while it's in another chat — freeing
+  //   it then would make a mid-conversation user look available.
   if (signalType === "accept") {
     await prisma.presence.updateMany({
       where: { id: { in: [fromId, toId] } },
       data: { busy: true },
     });
-  } else if (signalType === "decline") {
+  } else if (signalType === "end") {
     await prisma.presence.updateMany({
       where: { id: { in: [fromId, toId] } },
       data: { busy: false },

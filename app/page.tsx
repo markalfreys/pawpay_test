@@ -8,8 +8,8 @@ import ChatPanel, { type ChatMessage } from "./components/ChatPanel";
 import VideoPanel from "./components/VideoPanel";
 import { join, leave, poll, sendSignal } from "@/lib/api";
 import { PeerSession, type DescType, type PeerControl } from "@/lib/webrtc";
-import { POLL_INTERVAL_MS } from "@/lib/presence";
-import { type PeerDot, type SignalMsg } from "@/lib/types";
+import { FAST_POLL_INTERVAL_MS, POLL_INTERVAL_MS } from "@/lib/presence";
+import { type PeerDot, type PollResponse, type SignalMsg } from "@/lib/types";
 
 type Conn =
   | { kind: "idle" }
@@ -21,6 +21,13 @@ type Conn =
 type VideoState = "none" | "requesting" | "incoming" | "active";
 
 const REQUEST_TIMEOUT_MS = 30_000;
+// Accepted but the WebRTC data channel never opened (peer vanished mid-handshake,
+// or the network blocks P2P). Without this the chat sat on "Connecting…" forever.
+const CONNECT_TIMEOUT_MS = 25_000;
+const VIDEO_REQUEST_TIMEOUT_MS = 30_000;
+// The partner's dot must be missing from this many consecutive polls before we
+// treat them as gone (one miss can be a transient read).
+const PEER_GONE_POLLS = 2;
 
 export default function Home() {
   const [phase, setPhase] = useState<"gate" | "live">("gate");
@@ -50,19 +57,47 @@ export default function Home() {
 
   const peerRef = useRef<PeerSession | null>(null);
   const msgId = useRef(0);
-  const requestTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // One timer covers whichever pre-chat phase we're in (requesting → connecting).
+  const connTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const videoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const locationRef = useRef<{ lat: number; lng: number } | null>(null);
+  const missingPolls = useRef(0);
+  const rejoining = useRef(false);
 
   function showNotice(text: string) {
     setNotice(text);
-    window.setTimeout(() => setNotice(null), 3500);
+    // Reset the timer so a newer notice isn't cleared early by an older one.
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    noticeTimer.current = setTimeout(() => setNotice(null), 3500);
   }
 
   function addMessage(mine: boolean, text: string) {
     setMessages((prev) => [...prev, { id: msgId.current++, mine, text }]);
   }
 
-  function teardown(message?: string) {
-    if (requestTimer.current) clearTimeout(requestTimer.current);
+  function clearConnTimer() {
+    if (connTimer.current) clearTimeout(connTimer.current);
+    connTimer.current = null;
+  }
+
+  function clearVideoTimer() {
+    if (videoTimer.current) clearTimeout(videoTimer.current);
+    videoTimer.current = null;
+  }
+
+  // Ends the current connection locally. With `notifyPeer`, also sends "end"
+  // so the server frees both busy flags and the stranger's UI closes too —
+  // previously local failures (network, timeouts) never told the server, so
+  // the user stayed "busy" on everyone's map.
+  function teardown(message?: string, notifyPeer = false) {
+    const c = connRef.current;
+    if (notifyPeer && c.kind !== "idle") {
+      void sendSignal(sessionId, c.peerId, "end");
+    }
+    clearConnTimer();
+    clearVideoTimer();
+    missingPolls.current = 0;
     peerRef.current?.close();
     peerRef.current = null;
     setLocalStream(null);
@@ -71,6 +106,16 @@ export default function Home() {
     setMessages([]);
     setConn({ kind: "idle" });
     if (message) showNotice(message);
+  }
+
+  function armConnectTimeout(peerId: string) {
+    clearConnTimer();
+    connTimer.current = setTimeout(() => {
+      const c = connRef.current;
+      if (c.kind === "connecting" && c.peerId === peerId) {
+        teardown("Couldn't connect to the stranger.", true);
+      }
+    }, CONNECT_TIMEOUT_MS);
   }
 
   function startPeer(peerId: string, initiator: boolean) {
@@ -82,12 +127,16 @@ export default function Home() {
       onControl: (ctrl) => handleControl(ctrl),
       onRemoteStream: (stream) => setRemoteStream(stream),
       onConnectionState: (state) => {
-        if (state === "failed") {
-          teardown("Connection failed (network).");
+        if (state === "failed" && peerRef.current === ps) {
+          teardown("Connection failed (network).", true);
         }
       },
       onChannelOpen: () => {
+        clearConnTimer();
         setConn({ kind: "connected", peerId });
+      },
+      onChannelClose: () => {
+        if (peerRef.current === ps) teardown("Stranger disconnected.", true);
       },
     });
     peerRef.current = ps;
@@ -98,9 +147,13 @@ export default function Home() {
     switch (ctrl) {
       case "video-request":
         if (videoRef.current === "none") setVideo("incoming");
+        // Both sides tapped Video at the same moment: treat it as mutual consent
+        // rather than leaving each waiting on the other forever.
+        else if (videoRef.current === "requesting") acceptVideo();
         break;
       case "video-accept":
         if (videoRef.current === "requesting" && ps) {
+          clearVideoTimer();
           ps.startVideo()
             .then((stream) => {
               setLocalStream(stream);
@@ -115,11 +168,13 @@ export default function Home() {
         break;
       case "video-decline":
         if (videoRef.current === "requesting") {
+          clearVideoTimer();
           setVideo("none");
           showNotice("Video declined.");
         }
         break;
       case "video-end":
+        clearVideoTimer();
         ps?.stopVideo();
         setLocalStream(null);
         setRemoteStream(null);
@@ -132,22 +187,19 @@ export default function Home() {
     if (connRef.current.kind !== "idle") return;
     setConn({ kind: "requesting", peerId });
     void sendSignal(sessionId, peerId, "request");
-    requestTimer.current = setTimeout(() => {
+    clearConnTimer();
+    connTimer.current = setTimeout(() => {
       if (
         connRef.current.kind === "requesting" &&
         connRef.current.peerId === peerId
       ) {
-        void sendSignal(sessionId, peerId, "end");
-        teardown("No answer.");
+        teardown("No answer.", true);
       }
     }, REQUEST_TIMEOUT_MS);
   }
 
   function cancelRequest() {
-    if (connRef.current.kind === "requesting") {
-      void sendSignal(sessionId, connRef.current.peerId, "end");
-    }
-    teardown();
+    teardown(undefined, connRef.current.kind === "requesting");
   }
 
   function acceptIncoming() {
@@ -156,6 +208,7 @@ export default function Home() {
     startPeer(peerId, false);
     void sendSignal(sessionId, peerId, "accept");
     setConn({ kind: "connecting", peerId });
+    armConnectTimeout(peerId);
   }
 
   function declineIncoming() {
@@ -166,21 +219,34 @@ export default function Home() {
 
   function endConnection() {
     const c = connRef.current;
-    if (c.kind === "connecting" || c.kind === "connected") {
-      void sendSignal(sessionId, c.peerId, "end");
-    }
-    teardown();
+    teardown(undefined, c.kind === "connecting" || c.kind === "connected");
   }
 
   function startVideoRequest() {
     if (videoRef.current !== "none" || !peerRef.current) return;
     setVideo("requesting");
     peerRef.current.sendControl("video-request");
+    clearVideoTimer();
+    videoTimer.current = setTimeout(() => {
+      if (videoRef.current === "requesting") {
+        cancelVideoRequest();
+        showNotice("No answer to the video request.");
+      }
+    }, VIDEO_REQUEST_TIMEOUT_MS);
+  }
+
+  // Withdraw an unanswered video request; "video-end" closes the stranger's prompt.
+  function cancelVideoRequest() {
+    if (videoRef.current !== "requesting") return;
+    clearVideoTimer();
+    peerRef.current?.sendControl("video-end");
+    setVideo("none");
   }
 
   function acceptVideo() {
     const ps = peerRef.current;
     if (!ps) return;
+    clearVideoTimer();
     ps.startVideo()
       .then((stream) => {
         setLocalStream(stream);
@@ -221,16 +287,15 @@ export default function Home() {
       case "accept": {
         const c = connRef.current;
         if (c.kind === "requesting" && c.peerId === sig.fromId) {
-          if (requestTimer.current) clearTimeout(requestTimer.current);
           startPeer(sig.fromId, true);
           setConn({ kind: "connecting", peerId: sig.fromId });
+          armConnectTimeout(sig.fromId);
         }
         break;
       }
       case "decline": {
         const c = connRef.current;
         if (c.kind === "requesting" && c.peerId === sig.fromId) {
-          if (requestTimer.current) clearTimeout(requestTimer.current);
           teardown("Request declined.");
         }
         break;
@@ -265,9 +330,47 @@ export default function Home() {
     }
   }
 
-  const processSignalRef = useRef(processSignal);
+  function handlePoll(data: PollResponse) {
+    setPeers(data.peers);
+    for (const s of data.signals) processSignal(s);
+
+    // Our own row was reaped (e.g. the tab sat throttled in the background
+    // longer than STALE_MS). Re-join so we're visible again instead of being
+    // an invisible ghost who can see others but can't be seen or reached.
+    if (!data.present && locationRef.current && !rejoining.current) {
+      rejoining.current = true;
+      const { lat, lng } = locationRef.current;
+      join(sessionId, lat, lng)
+        .catch(() => {})
+        .finally(() => {
+          rejoining.current = false;
+        });
+    }
+
+    // The stranger we're dealing with disappeared from the map (closed the
+    // tab, lost network, got reaped) — end things on our side too.
+    const c = connRef.current;
+    if (c.kind === "idle") {
+      missingPolls.current = 0;
+      return;
+    }
+    const present = data.peers.some((p) => p.id === c.peerId);
+    missingPolls.current = present ? 0 : missingPolls.current + 1;
+    if (missingPolls.current < PEER_GONE_POLLS) return;
+    if (c.kind === "incoming") {
+      missingPolls.current = 0;
+      setConn({ kind: "idle" });
+    } else {
+      teardown(
+        c.kind === "requesting" ? "They went offline." : "Stranger disconnected.",
+        true,
+      );
+    }
+  }
+
+  const handlePollRef = useRef(handlePoll);
   useEffect(() => {
-    processSignalRef.current = processSignal;
+    handlePollRef.current = handlePoll;
   });
 
   useEffect(() => {
@@ -279,10 +382,13 @@ export default function Home() {
       try {
         const data = await poll(sessionId);
         if (!active) return;
-        setPeers(data.peers);
-        for (const s of data.signals) processSignalRef.current(s);
+        handlePollRef.current(data);
       } catch {}
-      if (active) timer = setTimeout(tick, POLL_INTERVAL_MS);
+      const k = connRef.current.kind;
+      const handshaking = k === "requesting" || k === "connecting";
+      if (active) {
+        timer = setTimeout(tick, handshaking ? FAST_POLL_INTERVAL_MS : POLL_INTERVAL_MS);
+      }
     };
     tick();
 
@@ -303,9 +409,12 @@ export default function Home() {
     };
   }, [sessionId, phase]);
 
+  // Throws if the server can't be reached, so the gate can show an error
+  // instead of dropping the user onto a map where nothing works.
   async function handleReady(lat: number, lng: number) {
-    setMyLocation({ lat, lng });
     await join(sessionId, lat, lng);
+    locationRef.current = { lat, lng };
+    setMyLocation({ lat, lng });
     setPhase("live");
   }
 
@@ -358,8 +467,8 @@ export default function Home() {
           connected={conn.kind === "connected"}
           videoBusy={video !== "none"}
           onSend={(text) => {
-            peerRef.current?.sendChat(text);
-            addMessage(true, text);
+            if (peerRef.current?.sendChat(text)) addMessage(true, text);
+            else showNotice("Message not sent — connection lost.");
           }}
           onStartVideo={startVideoRequest}
           onEnd={endConnection}
@@ -367,8 +476,14 @@ export default function Home() {
       )}
 
       {video === "requesting" && (
-        <div className="absolute bottom-24 left-1/2 z-30 -translate-x-1/2 rounded-full bg-zinc-800/90 px-4 py-2 text-sm text-zinc-100 shadow-lg backdrop-blur">
-          Waiting for stranger to accept video…
+        <div className="absolute bottom-24 left-1/2 z-30 flex -translate-x-1/2 items-center gap-3 rounded-full bg-zinc-800/90 px-4 py-2 text-sm text-zinc-100 shadow-lg backdrop-blur">
+          <span>Waiting for stranger to accept video…</span>
+          <button
+            onClick={cancelVideoRequest}
+            className="rounded-full bg-zinc-700 px-3 py-1 text-xs hover:bg-zinc-600"
+          >
+            Cancel
+          </button>
         </div>
       )}
 

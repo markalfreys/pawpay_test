@@ -1,5 +1,5 @@
 import path from "node:path";
-import { defineConfig, env } from "prisma/config";
+import { defineConfig } from "prisma/config";
 
 // Prisma 7 reads migration/introspection connection details from here (the
 // schema no longer holds a `url`). The Prisma CLI does not auto-load .env, so
@@ -16,6 +16,10 @@ export default defineConfig({
     path: path.join("prisma", "migrations"),
   },
   datasource: {
-    url: env("DATABASE_URL"),
+    // Not `env("DATABASE_URL")`: that throws when the variable is unset, which
+    // breaks `prisma generate` (the postinstall step) on a fresh clone before
+    // .env exists. Generate needs no database; commands that do connect
+    // (db push, migrate) still fail loudly on an empty URL.
+    url: process.env.DATABASE_URL ?? "",
   },
 });
