@@ -8,9 +8,11 @@
 //
 // Set CHROME_PATH to use a specific Chrome/Chromium binary.
 //
-// Note: run it against a database no *old* build of the app is also using —
-// the original heartbeat bug refreshed every row, so an old deployment on the
-// same DB keeps every dot alive and the crash check will (correctly) fail.
+// Run it against a quiet database:
+// - other people online nearby change what the map frames (it frames your
+//   nearest cluster), so the auto-framing check assumes A and B are alone;
+// - an *old* build of the app on the same DB keeps every dot alive (the
+//   original heartbeat bug refreshed every row), so the crash check fails.
 import { chromium } from "playwright-core";
 
 const BASE = process.argv[2] ?? "http://localhost:3000";
@@ -65,13 +67,17 @@ async function user(name, latitude, longitude) {
 
 async function enter(u) {
   await u.page.goto(BASE, { waitUntil: "load" });
+  const live = u.page.locator('main[data-phase="live"]');
   // Retry in case the first click lands before hydration attaches the handler.
-  for (let i = 0; i < 5; i++) {
-    const btn = u.page.getByRole("button", { name: /enter/i }).first();
-    if (!(await btn.isVisible().catch(() => false))) break;
-    await btn.click().catch(() => {});
-    await u.page.waitForTimeout(1500);
+  for (let i = 0; i < 5 && !(await live.count()); i++) {
+    await u.page
+      .getByRole("button", { name: /enter pulse/i })
+      .first()
+      .click({ timeout: 3_000 })
+      .catch(() => {});
+    await live.waitFor({ timeout: 4_000 }).catch(() => {});
   }
+  if (!(await live.count())) throw new Error("never left the entry screen");
   await u.page.waitForSelector(".mapboxgl-canvas", { timeout: 20_000 });
   for (let i = 0; i < 50 && !u.id; i++) await u.page.waitForTimeout(100);
   if (!u.id) throw new Error("no session id observed");
@@ -167,6 +173,11 @@ try {
       await waitBusy(A, B.id, true);
       await waitBusy(B, A.id, true);
     });
+    await step("typing indicator shows on the other side", async () => {
+      await chatInput(A).pressSequentially("hel");
+      await B.page.getByLabel("Stranger is typing").waitFor({ timeout: 5_000 });
+      await chatInput(A).fill("");
+    });
     await step("chat A → B delivered", async () => {
       await send(A, "hello from A");
       await text(B, "hello from A", 5_000);
@@ -213,6 +224,15 @@ try {
     await step("A ends chat → B's chat closes", async () => {
       await A.page.getByRole("button", { name: /^end( chat)?$/i }).first().click();
       await chatInput(B).waitFor({ state: "detached", timeout: 10_000 });
+    });
+    // B's transcript stays readable until B dismisses it (if the UI keeps it).
+    await step("B's ended chat can be dismissed", async () => {
+      const back = B.page.getByRole("button", { name: /back to the globe/i });
+      if (await back.count()) {
+        await text(B, "hello from A", 2_000);
+        await back.click();
+        await back.waitFor({ state: "detached", timeout: 3_000 });
+      }
     });
     await step("after ending, both dots available again", async () => {
       await waitBusy(A, B.id, false);

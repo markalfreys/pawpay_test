@@ -1,17 +1,26 @@
 // Client-side helpers for talking to the coordination API.
-import type { PollResponse, SignalType } from "@/lib/types";
+import type { GlobeResponse, PollResponse, SignalType } from "@/lib/types";
 
+// Resolves to the user's *public* position — the offset dot others see.
 export async function join(
   id: string,
   lat: number,
   lng: number,
-): Promise<void> {
+): Promise<{ lat: number; lng: number }> {
   const res = await fetch("/api/join", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ id, lat, lng }),
   });
   if (!res.ok) throw new Error(`join failed: ${res.status}`);
+  const data = await res.json();
+  return { lat: data.lat, lng: data.lng };
+}
+
+export async function globe(): Promise<GlobeResponse> {
+  const res = await fetch("/api/globe");
+  if (!res.ok) throw new Error(`globe failed: ${res.status}`);
+  return res.json();
 }
 
 export async function poll(id: string): Promise<PollResponse> {

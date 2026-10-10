@@ -43,20 +43,94 @@ the fix. Make sure no old deployment shares the database.
 
 ## Phase 2 — Make it good
 
-- **Auto-framing.** The map opened at a fixed zoom around you, so people in
-  your own city were one overlapping blob and you had to keep zooming in. Now
-  the camera fits you and every peer on screen, and re-frames when people join
-  or leave. It caps at neighbourhood zoom (12.5), so dots a few km apart
-  stay distinct and the map still shows context. After it has framed someone,
-  dragging or zooming yourself turns it off, so it never fights you. Gestures
-  made before anyone appears don't count: an early habitual zoom shouldn't
-  disable it before it ever helps. **Show everyone** re-frames and turns
-  auto-framing back on.
-- Moved the online counter to the top-left. At the bottom-left it sat on the
-  Mapbox logo, which their terms require to stay visible, and under the
-  Next.js dev badge.
+**Direction.** Pulse is "a living globe", so I designed it as a night-side
+view of Earth from space. Everything is dark and glassy so the people, glowing
+dots, are the brightest thing on screen. A single warm accent (a coral → amber
+"heartbeat" gradient) marks every primary action. The type pairs Instrument
+Serif for the few moments of voice (wordmark, prompts, "Say hello") with Geist
+for the UI. The layout already loaded Geist, but a stray `font-family: Arial`
+in `globals.css` was overriding it.
 
-_More to come._
+**The flow, screen by screen**
+
+- **Entry.** Instead of a black page with a button, you land on the real
+  globe, slowly spinning (Mapbox globe projection with atmosphere and stars),
+  with everyone online glowing on it before you join: "5 people online now".
+  It starts facing your side of the planet, using your timezone as a free,
+  permission-free hint. A new read-only `/api/globe` feeds it: anonymous (no
+  ids), coordinates rounded on top of the privacy offset, and CDN-cached for a
+  few seconds so gate traffic doesn't hit the database. Copy is short and
+  honest about privacy (no sign-up, 1–3 km offset, nothing stored). Location
+  errors explain how to recover.
+- **An empty globe shouldn't look dead.** Behind the real dots, the gate
+  globe shows an *illustrative* layer (`lib/ambient.ts`):
+  - Twinkling warm city lights clustered around ~140 real population centres.
+  - Every second or so, a "message" crosses between two of them: a comet
+    along a great-circle arc, then a ripple and a greeting in a local
+    language ("hola", "こんにちは", "kumusta"…), a nod to "Say hello."
+  - I kept it honest: these are much smaller than the heartbeat dots of real
+    people, never clickable, and the "N online now" count stays truthful.
+    The layer fades out the moment you enter, so the live map only ever
+    shows real people.
+  - It renders with Mapbox layers updated at ~30 fps and only animates the
+    side of the globe facing you. Reduced-motion users get static lights.
+- **Arrival.** Clicking Enter fades the copy out and the camera flies from
+  space to you. Your marker is now your *public* position (the offset dot
+  everyone else sees, returned by `/api/join`), not your real location, so
+  what you see is what others see.
+- **The map.** Dots beat with a staggered double "lub-dub" ring, each on its
+  own phase so the globe shimmers instead of blinking in sync. They pop in when
+  someone joins and fade out when they leave. Busy people are dimmed with a slow
+  dashed orbit and can't be tapped. The person you're calling or talking to is
+  highlighted. Each stranger keeps one colour from a curated palette across
+  their dot, their orb in prompts and the chat header. Tooltips say "Say hi" /
+  "In a conversation".
+  - Markers are built as a positioned root plus an animated child: Mapbox
+    writes `transform` on the root, so the old `.pulse-dot:hover { transform }`
+    fought the map's positioning.
+- **Auto-framing.** The map used to open at a fixed zoom, so people in your
+  own city were one overlapping blob. The camera now frames you and your
+  *nearest cluster*: everyone up to 4× your nearest neighbour's distance
+  (25 km minimum, 3,000 km maximum), capped at neighbourhood zoom. It
+  re-frames on joins and leaves. On a globe, "fit everyone" is the wrong goal:
+  a box from New York to Sydney centres on Africa and shows nobody.
+  - Once it has framed someone, your own drag or zoom turns auto-framing off,
+    so it never fights you. Gestures before anyone appears don't count.
+    **Show people near you** and **Find me** give the camera back.
+- **Requests.** Calling someone shows a non-blocking card with their orb and a
+  draining 30 s bar, so the globe stays usable. An incoming request is a
+  focused dialog with the requester's orb, so you can find their dot. It has
+  its own countdown, Esc declines, and it plays a soft synthesised two-note
+  chime (Web Audio, unlocked by the Enter click), buzzes on phones and flags
+  the tab title if Pulse is in the background. Copy is kind: "They can't talk
+  right now", "No answer — maybe try someone else?".
+- **Chat.** Full-screen sheet on phones, floating glass card on desktop. It
+  has grouped bubbles, a live "connecting / connected · peer-to-peer" status,
+  a typing indicator (throttled data-channel ping), system lines ("Video call
+  started"), a 1,000-character limit and long-word wrapping. When the *other*
+  person leaves, the transcript stays readable with "Stranger left the chat"
+  and **Back to the globe**, instead of being yanked away mid-sentence.
+- **Video.** Mic and camera toggles flip `track.enabled`, so they're instant
+  with no renegotiation. When the stranger turns their camera off, you see
+  "Their camera is off" rather than a frozen black frame. The camera now
+  requests 720p (16:9) instead of the 640×480 default. On desktop the call is
+  a floating card with the chat docked beside it. The "waiting for video"
+  state is an inline banner in the chat rather than a floating pill.
+- **Layout and accessibility.** Safe-area insets (`viewport-fit=cover`) for
+  notched phones. The online counter moved off the Mapbox logo, which their
+  terms require to stay visible, and the gate's scrims stop short of the
+  bottom edge for the same reason. Icon buttons have labels, dialogs are
+  `role="dialog"`, toasts are live regions, focus rings are visible, and
+  `prefers-reduced-motion` turns off the heartbeat, spin and transitions.
+- **Clean-up.** Removed the create-next-app leftovers (default favicon, unused
+  SVGs) and added a Pulse ECG icon. The only new dependency is `lucide-react`
+  for icons.
+
+**How I checked it.** The E2E test grew to 23 checks (typing indicator, ended
+transcript, auto-framing). I also scripted a screenshot tour of every state
+at 1440×900 and 390×844 and iterated on what I saw. That caught the Mapbox
+logo hidden behind the gate copy on mobile, the "fit everyone" globe
+centring on Africa, and an orb pulse that clipped inside its card.
 
 ## Phase 3 — Make it secure
 

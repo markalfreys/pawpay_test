@@ -43,5 +43,7 @@ export async function POST(request: NextRequest) {
     },
   });
 
-  return Response.json({ ok: true });
+  // Hand back the public (offset) position so the client can show the user
+  // exactly where everyone else sees them — not their real location.
+  return Response.json({ ok: true, lat: offset.lat, lng: offset.lng });
 }

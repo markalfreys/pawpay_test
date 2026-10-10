@@ -1,14 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Check, Link as LinkIcon } from "lucide-react";
 import EntryGate from "./components/EntryGate";
 import WorldMap from "./components/WorldMap";
 import ConnectionPrompt from "./components/ConnectionPrompt";
-import ChatPanel, { type ChatMessage } from "./components/ChatPanel";
+import CallingCard from "./components/CallingCard";
+import ChatPanel, { MAX_MESSAGE_LENGTH, type ChatMessage } from "./components/ChatPanel";
 import VideoPanel from "./components/VideoPanel";
-import { join, leave, poll, sendSignal } from "@/lib/api";
+import { LivePill, Toast, Wordmark } from "./components/ui";
+import { globe, join, leave, poll, sendSignal } from "@/lib/api";
 import { PeerSession, type DescType, type PeerControl } from "@/lib/webrtc";
 import { FAST_POLL_INTERVAL_MS, POLL_INTERVAL_MS } from "@/lib/presence";
+import { colorFor } from "@/lib/palette";
+import { playChime } from "@/lib/chime";
 import { type PeerDot, type PollResponse, type SignalMsg } from "@/lib/types";
 
 type Conn =
@@ -20,6 +25,8 @@ type Conn =
 
 type VideoState = "none" | "requesting" | "incoming" | "active";
 
+type LngLat = { lat: number; lng: number };
+
 const REQUEST_TIMEOUT_MS = 30_000;
 // Accepted but the WebRTC data channel never opened (peer vanished mid-handshake,
 // or the network blocks P2P). Without this the chat sat on "Connecting…" forever.
@@ -28,18 +35,41 @@ const VIDEO_REQUEST_TIMEOUT_MS = 30_000;
 // The partner's dot must be missing from this many consecutive polls before we
 // treat them as gone (one miss can be a transient read).
 const PEER_GONE_POLLS = 2;
+const GLOBE_PREVIEW_INTERVAL_MS = 5_000;
+const TYPING_SEND_INTERVAL_MS = 2_500;
+const TYPING_SHOW_MS = 4_000;
+const GATE_FADE_MS = 700;
+
+type EndOptions = {
+  // Toast to show once torn down.
+  notice?: string;
+  // Send "end" so the server frees both busy flags and the stranger's UI closes.
+  notifyPeer?: boolean;
+  // The *other side* ended an open chat: keep the transcript on screen
+  // (read-only) with this reason instead of yanking it away mid-sentence.
+  keepTranscript?: string;
+};
 
 export default function Home() {
   const [phase, setPhase] = useState<"gate" | "live">("gate");
+  const [gateMounted, setGateMounted] = useState(true);
+  const [preview, setPreview] = useState<PeerDot[]>([]);
+  const [previewOnline, setPreviewOnline] = useState<number | null>(null);
   const [sessionId] = useState(() => crypto.randomUUID());
   const [peers, setPeers] = useState<PeerDot[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [ended, setEnded] = useState<{ peerId: string; reason: string } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
-  const [myLocation, setMyLocation] = useState<{ lat: number; lng: number } | null>(
-    null,
-  );
+  const [remoteCamOff, setRemoteCamOff] = useState(false);
+  const [micOn, setMicOn] = useState(true);
+  const [camOn, setCamOn] = useState(true);
+  const [typing, setTyping] = useState(false);
+  // Where everyone else sees us (the server's offset position).
+  const [publicMe, setPublicMe] = useState<LngLat | null>(null);
+  const [hasTapped, setHasTapped] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   const [conn, _setConn] = useState<Conn>({ kind: "idle" });
   const connRef = useRef<Conn>(conn);
@@ -61,7 +91,10 @@ export default function Home() {
   const connTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const videoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const locationRef = useRef<{ lat: number; lng: number } | null>(null);
+  const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastTypingSent = useRef(0);
+  // The user's real coordinates — kept only in memory, for re-joining.
+  const locationRef = useRef<LngLat | null>(null);
   const missingPolls = useRef(0);
   const rejoining = useRef(false);
 
@@ -69,11 +102,18 @@ export default function Home() {
     setNotice(text);
     // Reset the timer so a newer notice isn't cleared early by an older one.
     if (noticeTimer.current) clearTimeout(noticeTimer.current);
-    noticeTimer.current = setTimeout(() => setNotice(null), 3500);
+    noticeTimer.current = setTimeout(() => setNotice(null), 3800);
   }
 
   function addMessage(mine: boolean, text: string) {
-    setMessages((prev) => [...prev, { id: msgId.current++, mine, text }]);
+    setMessages((prev) => [...prev, { id: msgId.current++, mine, text, at: Date.now() }]);
+  }
+
+  function addSystem(text: string) {
+    setMessages((prev) => [
+      ...prev,
+      { id: msgId.current++, mine: false, text, at: Date.now(), system: true },
+    ]);
   }
 
   function clearConnTimer() {
@@ -86,26 +126,51 @@ export default function Home() {
     videoTimer.current = null;
   }
 
+  function clearTyping() {
+    if (typingTimer.current) clearTimeout(typingTimer.current);
+    typingTimer.current = null;
+    setTyping(false);
+  }
+
+  function resetMedia() {
+    setLocalStream(null);
+    setRemoteStream(null);
+    setRemoteCamOff(false);
+    setMicOn(true);
+    setCamOn(true);
+  }
+
+  // Starting a new conversation clears whatever ended one was still on screen.
+  function freshConversation() {
+    setEnded(null);
+    setMessages([]);
+  }
+
   // Ends the current connection locally. With `notifyPeer`, also sends "end"
   // so the server frees both busy flags and the stranger's UI closes too —
   // previously local failures (network, timeouts) never told the server, so
   // the user stayed "busy" on everyone's map.
-  function teardown(message?: string, notifyPeer = false) {
+  function teardown({ notice, notifyPeer = false, keepTranscript }: EndOptions = {}) {
     const c = connRef.current;
     if (notifyPeer && c.kind !== "idle") {
       void sendSignal(sessionId, c.peerId, "end");
     }
     clearConnTimer();
     clearVideoTimer();
+    clearTyping();
     missingPolls.current = 0;
     peerRef.current?.close();
     peerRef.current = null;
-    setLocalStream(null);
-    setRemoteStream(null);
+    resetMedia();
     setVideo("none");
-    setMessages([]);
+    if (keepTranscript && c.kind === "connected") {
+      setEnded({ peerId: c.peerId, reason: keepTranscript });
+    } else {
+      freshConversation();
+      if (keepTranscript) showNotice(keepTranscript);
+    }
     setConn({ kind: "idle" });
-    if (message) showNotice(message);
+    if (notice) showNotice(notice);
   }
 
   function armConnectTimeout(peerId: string) {
@@ -113,7 +178,10 @@ export default function Home() {
     connTimer.current = setTimeout(() => {
       const c = connRef.current;
       if (c.kind === "connecting" && c.peerId === peerId) {
-        teardown("Couldn't connect to the stranger.", true);
+        teardown({
+          notice: "Couldn't connect — some networks block direct connections. Try someone else?",
+          notifyPeer: true,
+        });
       }
     }, CONNECT_TIMEOUT_MS);
   }
@@ -123,12 +191,16 @@ export default function Home() {
       onSignal: (type: DescType, payload: string) => {
         void sendSignal(sessionId, peerId, type, payload);
       },
-      onChat: (text) => addMessage(false, text),
+      onChat: (text) => {
+        if (typingTimer.current) clearTimeout(typingTimer.current);
+        setTyping(false);
+        addMessage(false, text);
+      },
       onControl: (ctrl) => handleControl(ctrl),
       onRemoteStream: (stream) => setRemoteStream(stream),
       onConnectionState: (state) => {
         if (state === "failed" && peerRef.current === ps) {
-          teardown("Connection failed (network).", true);
+          teardown({ keepTranscript: "The connection dropped.", notifyPeer: true });
         }
       },
       onChannelOpen: () => {
@@ -136,10 +208,28 @@ export default function Home() {
         setConn({ kind: "connected", peerId });
       },
       onChannelClose: () => {
-        if (peerRef.current === ps) teardown("Stranger disconnected.", true);
+        if (peerRef.current === ps) {
+          teardown({ keepTranscript: "Stranger left the chat.", notifyPeer: true });
+        }
       },
     });
     peerRef.current = ps;
+  }
+
+  function videoStarted(stream: MediaStream) {
+    setLocalStream(stream);
+    setMicOn(true);
+    setCamOn(true);
+    setVideo("active");
+    addSystem("Video call started");
+  }
+
+  function videoStopped() {
+    clearVideoTimer();
+    peerRef.current?.stopVideo();
+    resetMedia();
+    if (videoRef.current === "active") addSystem("Video call ended");
+    setVideo("none");
   }
 
   function handleControl(ctrl: PeerControl) {
@@ -155,10 +245,7 @@ export default function Home() {
         if (videoRef.current === "requesting" && ps) {
           clearVideoTimer();
           ps.startVideo()
-            .then((stream) => {
-              setLocalStream(stream);
-              setVideo("active");
-            })
+            .then(videoStarted)
             .catch(() => {
               setVideo("none");
               ps.sendControl("video-end");
@@ -170,21 +257,30 @@ export default function Home() {
         if (videoRef.current === "requesting") {
           clearVideoTimer();
           setVideo("none");
-          showNotice("Video declined.");
+          showNotice("They'd rather keep it to text for now.");
         }
         break;
       case "video-end":
-        clearVideoTimer();
-        ps?.stopVideo();
-        setLocalStream(null);
-        setRemoteStream(null);
-        setVideo("none");
+        videoStopped();
+        break;
+      case "typing":
+        setTyping(true);
+        if (typingTimer.current) clearTimeout(typingTimer.current);
+        typingTimer.current = setTimeout(() => setTyping(false), TYPING_SHOW_MS);
+        break;
+      case "cam-off":
+        setRemoteCamOff(true);
+        break;
+      case "cam-on":
+        setRemoteCamOff(false);
         break;
     }
   }
 
   function requestConnection(peerId: string) {
     if (connRef.current.kind !== "idle") return;
+    freshConversation();
+    setHasTapped(true);
     setConn({ kind: "requesting", peerId });
     void sendSignal(sessionId, peerId, "request");
     clearConnTimer();
@@ -193,18 +289,19 @@ export default function Home() {
         connRef.current.kind === "requesting" &&
         connRef.current.peerId === peerId
       ) {
-        teardown("No answer.", true);
+        teardown({ notice: "No answer — maybe try someone else?", notifyPeer: true });
       }
     }, REQUEST_TIMEOUT_MS);
   }
 
   function cancelRequest() {
-    teardown(undefined, connRef.current.kind === "requesting");
+    teardown({ notifyPeer: connRef.current.kind === "requesting" });
   }
 
   function acceptIncoming() {
     if (connRef.current.kind !== "incoming") return;
     const peerId = connRef.current.peerId;
+    freshConversation();
     startPeer(peerId, false);
     void sendSignal(sessionId, peerId, "accept");
     setConn({ kind: "connecting", peerId });
@@ -219,7 +316,7 @@ export default function Home() {
 
   function endConnection() {
     const c = connRef.current;
-    teardown(undefined, c.kind === "connecting" || c.kind === "connected");
+    teardown({ notifyPeer: c.kind === "connecting" || c.kind === "connected" });
   }
 
   function startVideoRequest() {
@@ -249,9 +346,8 @@ export default function Home() {
     clearVideoTimer();
     ps.startVideo()
       .then((stream) => {
-        setLocalStream(stream);
         ps.sendControl("video-accept");
-        setVideo("active");
+        videoStarted(stream);
       })
       .catch(() => {
         ps.sendControl("video-decline");
@@ -266,12 +362,54 @@ export default function Home() {
   }
 
   function endVideo() {
-    const ps = peerRef.current;
-    ps?.stopVideo();
-    ps?.sendControl("video-end");
-    setLocalStream(null);
-    setRemoteStream(null);
-    setVideo("none");
+    peerRef.current?.sendControl("video-end");
+    videoStopped();
+  }
+
+  function toggleMic() {
+    const on = !micOn;
+    peerRef.current?.setMicEnabled(on);
+    setMicOn(on);
+  }
+
+  function toggleCam() {
+    const on = !camOn;
+    peerRef.current?.setCameraEnabled(on);
+    peerRef.current?.sendControl(on ? "cam-on" : "cam-off");
+    setCamOn(on);
+  }
+
+  function sendMessage(text: string) {
+    const clipped = text.slice(0, MAX_MESSAGE_LENGTH);
+    if (peerRef.current?.sendChat(clipped)) {
+      addMessage(true, clipped);
+      // Next keystroke starts a fresh "typing…" burst on their side.
+      lastTypingSent.current = 0;
+    } else {
+      showNotice("Message not sent — connection lost.");
+    }
+  }
+
+  // Throttled: at most one "typing" ping every couple of seconds.
+  function notifyTyping() {
+    const now = Date.now();
+    if (now - lastTypingSent.current < TYPING_SEND_INTERVAL_MS) return;
+    lastTypingSent.current = now;
+    peerRef.current?.sendControl("typing");
+  }
+
+  function closeEndedChat() {
+    freshConversation();
+  }
+
+  async function copyInvite() {
+    try {
+      await navigator.clipboard.writeText(window.location.origin);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      showNotice(window.location.origin);
+    }
   }
 
   function processSignal(sig: SignalMsg) {
@@ -296,7 +434,7 @@ export default function Home() {
       case "decline": {
         const c = connRef.current;
         if (c.kind === "requesting" && c.peerId === sig.fromId) {
-          teardown("Request declined.");
+          teardown({ notice: "They can't talk right now." });
         }
         break;
       }
@@ -323,7 +461,7 @@ export default function Home() {
           c.peerId === sig.fromId
         ) {
           if (c.kind === "incoming") setConn({ kind: "idle" });
-          else teardown("Stranger disconnected.");
+          else teardown({ keepTranscript: "Stranger left the chat." });
         }
         break;
       }
@@ -341,6 +479,7 @@ export default function Home() {
       rejoining.current = true;
       const { lat, lng } = locationRef.current;
       join(sessionId, lat, lng)
+        .then(setPublicMe)
         .catch(() => {})
         .finally(() => {
           rejoining.current = false;
@@ -360,11 +499,10 @@ export default function Home() {
     if (c.kind === "incoming") {
       missingPolls.current = 0;
       setConn({ kind: "idle" });
+    } else if (c.kind === "requesting") {
+      teardown({ notice: "They went offline.", notifyPeer: true });
     } else {
-      teardown(
-        c.kind === "requesting" ? "They went offline." : "Stranger disconnected.",
-        true,
-      );
+      teardown({ keepTranscript: "Stranger went offline.", notifyPeer: true });
     }
   }
 
@@ -372,6 +510,34 @@ export default function Home() {
   useEffect(() => {
     handlePollRef.current = handlePoll;
   });
+
+  // Gate: a live, anonymous preview of who's on the globe right now.
+  useEffect(() => {
+    if (phase !== "gate") return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      try {
+        const g = await globe();
+        if (!active) return;
+        setPreviewOnline(g.online);
+        // Key by (rounded) position: stable for a person's whole session, so
+        // dots don't reshuffle between refreshes.
+        const byPos = new Map<string, PeerDot>();
+        for (const p of g.peers) {
+          const id = `preview:${p.lat.toFixed(3)},${p.lng.toFixed(3)}`;
+          byPos.set(id, { id, ...p });
+        }
+        setPreview([...byPos.values()]);
+      } catch {}
+      if (active) timer = setTimeout(tick, GLOBE_PREVIEW_INTERVAL_MS);
+    };
+    tick();
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [phase]);
 
   useEffect(() => {
     if (phase !== "live" || !sessionId) return;
@@ -409,99 +575,156 @@ export default function Home() {
     };
   }, [sessionId, phase]);
 
+  // Someone's asking (to connect, or to start video): chime, buzz on phones,
+  // and flag the tab title in case Pulse is in a background tab.
+  const asking = conn.kind === "incoming" || video === "incoming";
+  useEffect(() => {
+    if (!asking) return;
+    playChime();
+    navigator.vibrate?.(120);
+    const original = document.title;
+    document.title = "● Someone wants to talk — Pulse";
+    return () => {
+      document.title = original;
+    };
+  }, [asking]);
+
   // Throws if the server can't be reached, so the gate can show an error
   // instead of dropping the user onto a map where nothing works.
   async function handleReady(lat: number, lng: number) {
-    await join(sessionId, lat, lng);
+    const pub = await join(sessionId, lat, lng);
     locationRef.current = { lat, lng };
-    setMyLocation({ lat, lng });
+    setPublicMe(pub);
     setPhase("live");
-  }
-
-  if (phase === "gate") {
-    return <EntryGate onReady={handleReady} />;
+    // Keep the gate mounted while it fades out over the camera fly-in.
+    setTimeout(() => setGateMounted(false), GATE_FADE_MS);
   }
 
   const inChat = conn.kind === "connecting" || conn.kind === "connected";
+  const chatOpen = inChat || ended !== null;
+  const chatPeerId = inChat ? conn.peerId : (ended?.peerId ?? null);
+  const highlightId = conn.kind !== "idle" ? conn.peerId : null;
+  const others = peers.length;
+  const showHint =
+    phase === "live" && conn.kind === "idle" && !chatOpen && (others === 0 || !hasTapped);
 
   return (
-    <main className="fixed inset-0 overflow-hidden">
+    <main data-phase={phase} className="fixed inset-0 overflow-hidden bg-bg text-ink">
       <WorldMap
-        peers={peers}
-        me={myLocation}
+        mode={phase}
+        peers={phase === "live" ? peers : preview}
+        me={phase === "live" ? publicMe : null}
+        highlightId={highlightId}
         onPeerClick={requestConnection}
         canConnect={conn.kind === "idle"}
+        chatOpen={chatOpen}
       />
 
-      {notice && (
-        <div className="absolute left-1/2 top-20 z-30 -translate-x-1/2 rounded-full bg-zinc-800/90 px-4 py-2 text-sm text-zinc-100 shadow-lg backdrop-blur">
-          {notice}
+      {gateMounted && (
+        <EntryGate onReady={handleReady} online={previewOnline} leaving={phase === "live"} />
+      )}
+
+      {phase === "live" && (
+        <header className="animate-fade pointer-events-none absolute left-4 top-[calc(1rem+var(--safe-top))] z-10 md:left-6 md:top-6">
+          <div className="glass pointer-events-auto inline-flex items-center gap-2 rounded-full py-1.5 pl-4 pr-1.5">
+            <Wordmark />
+            <LivePill
+              online={others + 1}
+              label={others === 0 ? "Just you" : `${others + 1} online`}
+              className="bg-white/[0.06]"
+            />
+          </div>
+        </header>
+      )}
+
+      {showHint && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-[calc(2.75rem+var(--safe-bottom))] z-10 flex justify-center px-4 md:bottom-8">
+          <div
+            className="glass animate-rise pointer-events-auto flex items-center gap-3 rounded-full py-2 pl-4 pr-2 text-sm"
+            style={{ animationDelay: "1.2s" }}
+          >
+            {others === 0 ? (
+              <>
+                <span className="text-muted">You&rsquo;re the only one here right now.</span>
+                <button type="button" onClick={copyInvite} className="btn btn-ghost h-8 px-3 text-xs">
+                  {copied ? <Check className="h-3.5 w-3.5" /> : <LinkIcon className="h-3.5 w-3.5" />}
+                  {copied ? "Copied" : "Invite someone"}
+                </button>
+              </>
+            ) : (
+              <span className="pr-2 text-ink/90">Tap a glowing dot to say hi</span>
+            )}
+          </div>
         </div>
       )}
 
+      {notice && <Toast key={notice} text={notice} />}
+
       {conn.kind === "requesting" && (
-        <div className="absolute left-1/2 top-20 z-30 flex -translate-x-1/2 items-center gap-3 rounded-full bg-zinc-800/90 px-4 py-2 text-sm text-zinc-100 shadow-lg backdrop-blur">
-          <span>Requesting connection…</span>
-          <button
-            onClick={cancelRequest}
-            className="rounded-full bg-zinc-700 px-3 py-1 text-xs hover:bg-zinc-600"
-          >
-            Cancel
-          </button>
-        </div>
+        <CallingCard
+          color={colorFor(conn.peerId)}
+          title="Calling…"
+          subtitle="Waiting for them to say yes"
+          onCancel={cancelRequest}
+          timeoutMs={REQUEST_TIMEOUT_MS}
+        />
       )}
 
       {conn.kind === "incoming" && (
         <ConnectionPrompt
-          title="A stranger wants to connect"
+          key={conn.peerId}
+          title="Someone wants to connect"
+          subtitle="Accept to open a private chat — just the two of you, peer to peer."
           acceptLabel="Accept"
-          declineLabel="Decline"
+          declineLabel="Not now"
+          color={colorFor(conn.peerId)}
+          expiresInMs={REQUEST_TIMEOUT_MS - 2_000}
           onAccept={acceptIncoming}
           onDecline={declineIncoming}
         />
       )}
 
-      {inChat && (
+      {chatOpen && chatPeerId && (
         <ChatPanel
           messages={messages}
-          connected={conn.kind === "connected"}
+          status={conn.kind === "connected" ? "connected" : inChat ? "connecting" : "ended"}
+          endedReason={ended?.reason}
+          color={colorFor(chatPeerId)}
+          typing={typing}
           videoBusy={video !== "none"}
-          onSend={(text) => {
-            if (peerRef.current?.sendChat(text)) addMessage(true, text);
-            else showNotice("Message not sent — connection lost.");
-          }}
+          videoRequesting={video === "requesting"}
+          onSend={sendMessage}
+          onTyping={notifyTyping}
           onStartVideo={startVideoRequest}
+          onCancelVideo={cancelVideoRequest}
           onEnd={endConnection}
+          onClose={closeEndedChat}
         />
       )}
 
-      {video === "requesting" && (
-        <div className="absolute bottom-24 left-1/2 z-30 flex -translate-x-1/2 items-center gap-3 rounded-full bg-zinc-800/90 px-4 py-2 text-sm text-zinc-100 shadow-lg backdrop-blur">
-          <span>Waiting for stranger to accept video…</span>
-          <button
-            onClick={cancelVideoRequest}
-            className="rounded-full bg-zinc-700 px-3 py-1 text-xs hover:bg-zinc-600"
-          >
-            Cancel
-          </button>
-        </div>
-      )}
-
-      {video === "incoming" && (
+      {video === "incoming" && chatPeerId && (
         <ConnectionPrompt
-          title="Start video call?"
-          subtitle="The stranger wants to turn on video."
+          kind="video"
+          title="Video call?"
+          subtitle="The stranger wants to turn on video. Your camera stays off unless you accept."
           acceptLabel="Accept"
-          declineLabel="Decline"
+          declineLabel="Not now"
+          color={colorFor(chatPeerId)}
           onAccept={acceptVideo}
           onDecline={declineVideo}
         />
       )}
 
-      {video === "active" && (
+      {video === "active" && chatPeerId && (
         <VideoPanel
           localStream={localStream}
           remoteStream={remoteStream}
+          remoteCameraOff={remoteCamOff}
+          micOn={micOn}
+          camOn={camOn}
+          color={colorFor(chatPeerId)}
+          onToggleMic={toggleMic}
+          onToggleCam={toggleCam}
           onEnd={endVideo}
         />
       )}

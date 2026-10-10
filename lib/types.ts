@@ -26,6 +26,12 @@ export interface SignalMsg {
   createdAt: string;
 }
 
+// Pre-join preview of the globe (anonymous: no ids).
+export interface GlobeResponse {
+  online: number;
+  peers: { lat: number; lng: number; busy: boolean }[];
+}
+
 export interface PollResponse {
   // false when the caller's presence row no longer exists → client re-joins.
   present: boolean;

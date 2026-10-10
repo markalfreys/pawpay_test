@@ -3,7 +3,10 @@ export type PeerControl =
   | "video-request"
   | "video-accept"
   | "video-decline"
-  | "video-end";
+  | "video-end"
+  | "typing" // throttled "I'm typing" ping
+  | "cam-off" // sender paused their camera (so the other side can say so
+  | "cam-on"; //  instead of showing a frozen black frame)
 
 interface PeerCallbacks {
   onSignal: (type: DescType, payload: string) => void;
@@ -191,7 +194,12 @@ export class PeerSession {
   startVideo(): Promise<MediaStream> {
     if (this.localStream) return Promise.resolve(this.localStream);
     this.startingVideo ??= navigator.mediaDevices
-      .getUserMedia({ video: true, audio: true })
+      // `video: true` gets 640×480 (4:3) on most webcams: soft, and cropped
+      // hard when filling a wide screen. Ask for 720p (16:9) when available.
+      .getUserMedia({
+        video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: { echoCancellation: true, noiseSuppression: true },
+      })
       .then((stream) => {
         if (this.closed) {
           for (const track of stream.getTracks()) track.stop();
@@ -207,6 +215,16 @@ export class PeerSession {
         this.startingVideo = null;
       });
     return this.startingVideo;
+  }
+
+  // Mute / camera toggles flip track.enabled: instant, no renegotiation, and
+  // the stranger receives silence / black instead of our media.
+  setMicEnabled(on: boolean) {
+    for (const t of this.localStream?.getAudioTracks() ?? []) t.enabled = on;
+  }
+
+  setCameraEnabled(on: boolean) {
+    for (const t of this.localStream?.getVideoTracks() ?? []) t.enabled = on;
   }
 
   stopVideo() {
