@@ -1,14 +1,30 @@
-import type { NextRequest } from "next/server";
+import { after, type NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { STALE_MS, SIGNAL_TTL_MS } from "@/lib/presence";
+import { STALE_MS, SIGNAL_TTL_MS, REAP_INTERVAL_MS } from "@/lib/presence";
 import type { PollResponse } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+type SignalRow = {
+  id: string;
+  fromId: string;
+  toId: string;
+  type: string;
+  payload: string | null;
+  createdAt: Date;
+};
+
+// Per-instance throttle for garbage collection (see reap()).
+let lastReapAt = 0;
+
 // GET /api/poll?id= — the single endpoint that drives the live map.
-// It (1) heartbeats the caller, (2) reaps stale presence + orphan signals,
-// (3) returns the filtered online peers, and (4) drains this user's mailbox.
+// It (1) heartbeats the caller, (2) returns the filtered online peers, and
+// (3) drains this user's mailbox. Stale rows are garbage-collected after the
+// response is sent.
+//
+// The three queries are independent, so they run concurrently: one database
+// round trip per poll instead of five sequential ones.
 export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
   const id = params.get("id");
@@ -19,41 +35,47 @@ export async function GET(request: NextRequest) {
 
   const now = Date.now();
   const staleCutoff = new Date(now - STALE_MS);
-  const signalCutoff = new Date(now - SIGNAL_TTL_MS);
 
-  // 1) Heartbeat — refresh lastSeen for the caller.
-  await prisma.presence.updateMany({
-    where: {},
-    data: { lastSeen: new Date(now) },
-  });
+  const [heartbeat, peers, inbox] = await Promise.all([
+    // 1) Heartbeat — refresh lastSeen for the caller ONLY. (This used to be
+    // `where: {}`, which refreshed every row on every poll, so no dot ever
+    // went stale and closed tabs lingered on the map indefinitely.)
+    prisma.presence.updateMany({
+      where: { id },
+      data: { lastSeen: new Date(now) },
+    }),
 
-  // 2) Reap stale presence rows and orphaned signals (independent deletes —
-  // no atomicity needed, and avoids transactions over a PgBouncer pooler).
-  await prisma.presence.deleteMany({ where: { lastSeen: { lt: staleCutoff } } });
-  await prisma.signal.deleteMany({ where: { createdAt: { lt: signalCutoff } } });
+    // 2) Online peers, excluding self. Stale rows are filtered here, so they
+    // vanish from the map even before the reaper physically deletes them.
+    prisma.presence.findMany({
+      where: {
+        id: { not: id },
+        lastSeen: { gte: staleCutoff },
+      },
+      select: { id: true, lat: true, lng: true, busy: true },
+    }),
 
-  // 3) Online peers, excluding self.
-  const peers = await prisma.presence.findMany({
-    where: {
-      id: { not: id },
-      lastSeen: { gte: staleCutoff },
-    },
-    select: { id: true, lat: true, lng: true, busy: true },
-  });
+    // 3) Drain this user's mailbox atomically: DELETE … RETURNING removes
+    // exactly the rows it hands back, so a concurrently-inserted signal is
+    // never lost and there's no read-then-delete round trip.
+    prisma.$queryRaw<SignalRow[]>`
+      DELETE FROM "Signal"
+      WHERE "toId" = ${id}
+      RETURNING "id", "fromId", "toId", "type", "payload", "createdAt"`,
+  ]);
 
-  // 4) Drain this user's mailbox: read, then delete exactly what we read so a
-  // concurrently-inserted signal is never lost.
-  const inbox = await prisma.signal.findMany({
-    where: { toId: id },
-    orderBy: { createdAt: "asc" },
-  });
-  if (inbox.length > 0) {
-    await prisma.signal.deleteMany({
-      where: { id: { in: inbox.map((s) => s.id) } },
-    });
+  if (now - lastReapAt > REAP_INTERVAL_MS) {
+    lastReapAt = now;
+    after(() => reap(now));
   }
 
+  inbox.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+
   const response: PollResponse = {
+    // The caller's own row is gone (reaped while their tab was throttled in
+    // the background, or after a bfcache restore). Tell the client to re-join
+    // instead of silently polling as an invisible ghost.
+    present: heartbeat.count > 0,
     peers: peers.map((p) => ({
       id: p.id,
       lat: p.lat,
@@ -71,4 +93,23 @@ export async function GET(request: NextRequest) {
   };
 
   return Response.json(response);
+}
+
+// Garbage-collect stale presence rows and orphaned signals. Independent
+// deletes — no atomicity needed, and avoids transactions over a PgBouncer
+// pooler. Correctness doesn't depend on this running (reads filter by time),
+// so it's throttled per server instance and runs off the response path.
+async function reap(now: number) {
+  try {
+    await Promise.all([
+      prisma.presence.deleteMany({
+        where: { lastSeen: { lt: new Date(now - STALE_MS) } },
+      }),
+      prisma.signal.deleteMany({
+        where: { createdAt: { lt: new Date(now - SIGNAL_TTL_MS) } },
+      }),
+    ]);
+  } catch (err) {
+    console.error("[pulse] reap failed", err);
+  }
 }

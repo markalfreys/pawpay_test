@@ -12,6 +12,9 @@ interface PeerCallbacks {
   onRemoteStream: (stream: MediaStream | null) => void;
   onConnectionState: (state: RTCPeerConnectionState) => void;
   onChannelOpen: () => void;
+  // The data channel closed underneath us (the stranger closed their tab or
+  // their peer connection) — the session is over.
+  onChannelClose: () => void;
 }
 
 const ICE_CONFIG: RTCConfiguration = {
@@ -25,9 +28,13 @@ export class PeerSession {
   private makingOffer = false;
   private ignoreOffer = false;
   private localStream: MediaStream | null = null;
+  private startingVideo: Promise<MediaStream> | null = null;
   private closed = false;
   private readonly cb: PeerCallbacks;
   private pendingCandidates: RTCIceCandidateInit[] = [];
+  // Signals are applied strictly one at a time, in arrival order. Without this
+  // an ICE candidate can race a still-pending setRemoteDescription().
+  private signalChain: Promise<void> = Promise.resolve();
 
   constructor(initiator: boolean, cb: PeerCallbacks) {
     this.cb = cb;
@@ -36,7 +43,7 @@ export class PeerSession {
 
     this.pc.onicecandidate = ({ candidate }) => {
       if (candidate) {
-        this.cb.onSignal("ice", JSON.stringify(candidate));
+        this.emitSignal("ice", JSON.stringify(candidate));
       }
     };
 
@@ -45,8 +52,10 @@ export class PeerSession {
         this.makingOffer = true;
         await this.pc.setLocalDescription();
         if (this.pc.localDescription) {
-          this.cb.onSignal("offer", JSON.stringify(this.pc.localDescription));
+          this.emitSignal("offer", JSON.stringify(this.pc.localDescription));
         }
+      } catch (err) {
+        if (!this.closed) console.warn("[pulse] negotiation failed", err);
       } finally {
         this.makingOffer = false;
       }
@@ -73,6 +82,9 @@ export class PeerSession {
 
   private wireDataChannel(dc: RTCDataChannel) {
     dc.onopen = () => this.cb.onChannelOpen();
+    dc.onclose = () => {
+      if (!this.closed) this.cb.onChannelClose();
+    };
     dc.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data as string);
@@ -80,12 +92,38 @@ export class PeerSession {
           this.cb.onChat(msg.text);
         } else if (msg.t === "ctrl" && typeof msg.ctrl === "string") {
           this.cb.onControl(msg.ctrl as PeerControl);
+        } else if (
+          msg.t === "sig" &&
+          (msg.type === "offer" || msg.type === "answer" || msg.type === "ice") &&
+          typeof msg.payload === "string"
+        ) {
+          void this.handleSignal(msg.type, msg.payload);
         }
       } catch {}
     };
   }
 
-  async handleSignal(type: DescType, payload: string) {
+  // Before the data channel opens, signaling has to go through the server.
+  // Once it's open, renegotiation (starting/stopping video, late ICE) goes
+  // peer-to-peer over the channel: no poll round trips, and the server never
+  // sees those SDPs.
+  private emitSignal(type: DescType, payload: string) {
+    if (this.closed) return;
+    if (!this.safeSend({ t: "sig", type, payload })) {
+      this.cb.onSignal(type, payload);
+    }
+  }
+
+  handleSignal(type: DescType, payload: string): Promise<void> {
+    this.signalChain = this.signalChain
+      .then(() => this.applySignal(type, payload))
+      .catch((err) => {
+        if (!this.closed) console.warn("[pulse] signal failed", type, err);
+      });
+    return this.signalChain;
+  }
+
+  private async applySignal(type: DescType, payload: string) {
     if (this.closed) return;
     const data = JSON.parse(payload);
 
@@ -107,12 +145,15 @@ export class PeerSession {
     this.ignoreOffer = !this.polite && offerCollision;
     if (this.ignoreOffer) return;
 
-    await this.flushPendingCandidates();
     await this.pc.setRemoteDescription(desc);
+    // Candidates can only be added once a remote description exists — flushing
+    // them before setRemoteDescription() silently dropped every early one.
+    await this.flushPendingCandidates();
+    if (this.closed) return;
     if (desc.type === "offer") {
       await this.pc.setLocalDescription();
       if (this.pc.localDescription) {
-        this.cb.onSignal("answer", JSON.stringify(this.pc.localDescription));
+        this.emitSignal("answer", JSON.stringify(this.pc.localDescription));
       }
     }
   }
@@ -128,31 +169,44 @@ export class PeerSession {
     }
   }
 
-  sendChat(text: string) {
-    this.safeSend({ t: "msg", text });
+  sendChat(text: string): boolean {
+    // Must match the receiver's `msg.t === "chat"` check in wireDataChannel.
+    return this.safeSend({ t: "chat", text });
   }
 
   sendControl(ctrl: PeerControl) {
     this.safeSend({ t: "ctrl", ctrl });
   }
 
-  private safeSend(obj: unknown) {
+  private safeSend(obj: unknown): boolean {
     if (this.dc && this.dc.readyState === "open") {
       this.dc.send(JSON.stringify(obj));
+      return true;
     }
+    return false;
   }
 
-  async startVideo(): Promise<MediaStream> {
-    if (!this.localStream) {
-      this.localStream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true,
+  // Idempotent while a getUserMedia() call is in flight, so two overlapping
+  // calls (e.g. both users tapping Video at once) can't add the tracks twice.
+  startVideo(): Promise<MediaStream> {
+    if (this.localStream) return Promise.resolve(this.localStream);
+    this.startingVideo ??= navigator.mediaDevices
+      .getUserMedia({ video: true, audio: true })
+      .then((stream) => {
+        if (this.closed) {
+          for (const track of stream.getTracks()) track.stop();
+          throw new Error("session closed");
+        }
+        this.localStream = stream;
+        for (const track of stream.getTracks()) {
+          this.pc.addTrack(track, stream);
+        }
+        return stream;
+      })
+      .finally(() => {
+        this.startingVideo = null;
       });
-      for (const track of this.localStream.getTracks()) {
-        this.pc.addTrack(track, this.localStream);
-      }
-    }
-    return this.localStream;
+    return this.startingVideo;
   }
 
   stopVideo() {

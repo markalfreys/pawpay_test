@@ -5,31 +5,53 @@ import { useState } from "react";
 export default function EntryGate({
   onReady,
 }: {
-  onReady: (lat: number, lng: number) => void;
+  onReady: (lat: number, lng: number) => Promise<void>;
 }) {
   const [status, setStatus] = useState<"idle" | "locating" | "error">("idle");
   const [error, setError] = useState<string>("");
 
+  function fail(message: string) {
+    setStatus("error");
+    setError(message);
+  }
+
+  async function located(pos: GeolocationPosition) {
+    try {
+      await onReady(pos.coords.latitude, pos.coords.longitude);
+    } catch {
+      fail("Couldn't reach Pulse. Check your connection and try again.");
+    }
+  }
+
+  function locationError(err: GeolocationPositionError) {
+    fail(
+      err.code === err.PERMISSION_DENIED
+        ? "Location permission is required to place you on the map."
+        : "Couldn't get your location. Please try again.",
+    );
+  }
+
   function enter() {
     if (!("geolocation" in navigator)) {
-      setStatus("error");
-      setError("Your browser doesn't support location access.");
+      fail("Your browser doesn't support location access.");
       return;
     }
     setStatus("locating");
     navigator.geolocation.getCurrentPosition(
-      (pos) => onReady(pos.coords.latitude, pos.coords.longitude),
+      located,
       (err) => {
-        setStatus("error");
-        setError(
-          err.code === err.PERMISSION_DENIED
-            ? "Location permission is required to place you on the map."
-            : "Couldn't get your location. Please try again.",
-        );
+        if (err.code === err.PERMISSION_DENIED) return locationError(err);
+        // Desktops without GPS often time out on a high-accuracy fix. The dot
+        // is offset 1–3 km anyway, so a coarse network fix is plenty.
+        navigator.geolocation.getCurrentPosition(located, locationError, {
+          enableHighAccuracy: false,
+          timeout: 10_000,
+          maximumAge: 60_000,
+        });
       },
       // High accuracy + maximumAge:0 forces a fresh fix (Wi-Fi/GPS scan)
       // instead of reusing the browser's cached IP-based location.
-      { enableHighAccuracy: true, timeout: 15_000, maximumAge: 0 },
+      { enableHighAccuracy: true, timeout: 10_000, maximumAge: 0 },
     );
   }
 
