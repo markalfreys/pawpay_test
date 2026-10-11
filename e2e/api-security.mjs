@@ -141,6 +141,12 @@ try {
     status(await signal(M, B.id, "end"), 200);
     expect((await seen(V, B))?.busy, "B was freed by M's end");
   });
+  await check("nobody can wave at someone in a conversation", async () => {
+    status(await signal(M, A.id, "wave"), 409);
+  });
+  await check("someone in a conversation can't wave at others", async () => {
+    status(await signal(A, M.id, "wave"), 409);
+  });
 
   // --- Payloads -----------------------------------------------------------
   await check("malformed payloads are rejected", async () => {
@@ -148,6 +154,8 @@ try {
     status(await signal(A, B.id, "offer", JSON.stringify({ type: "answer", sdp: "v=0" })), 400);
     status(await signal(A, B.id, "offer", "x".repeat(17 * 1024)), 400);
     status(await signal(A, B.id, "end", "unexpected"), 400);
+    status(await signal(A, B.id, "wave", "a wave carries no text"), 400);
+    status(await signal(A, B.id, "unwave", "neither does an unwave"), 400);
   });
   await check("relayed payloads carry only the expected fields", async () => {
     const ice = { candidate: "candidate:1 1 udp 1 192.0.2.1 9 typ host", sdpMid: "0", sdpMLineIndex: 0, extra: "<img onerror=alert(1)>" };
@@ -176,6 +184,11 @@ try {
   });
 
   // --- Rate limiting ------------------------------------------------------
+  await check("one person can't be flooded with waves", async () => {
+    const codes = [];
+    for (let i = 0; i < 3; i++) codes.push((await signal(M, V.id, "wave")).status);
+    expect(codes[0] === 200 && codes[1] === 200 && codes[2] === 429, `statuses ${codes}`);
+  });
   await check("one person can't be flooded with connection requests", async () => {
     const codes = [];
     for (let i = 0; i < 4; i++) codes.push((await signal(M, V.id, "request")).status);
