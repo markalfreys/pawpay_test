@@ -160,8 +160,9 @@ Ranked by what an attacker could actually do to Pulse, not by CVE score:
   (`iceTransportPolicy: "relay"`), an external service the requirements rule
   out. It now happens only after you accept. Before #1 and #2, anyone could
   collect strangers' ICE candidates.
-- **No block or report.** That's a missing safety feature rather than an API
-  bug; it's a Phase 4 candidate.
+- **No report.** Phase 4 adds a one-tap block for the session ("Block this
+  person" on a wave), but there's no way to report someone: with no accounts,
+  there's nobody to act on.
 - **Averaging across sessions.** Someone who uses Pulse often from home gets
   a new offset each session. If an observer can tell those sessions are the
   same person (say, the only dot in a small town every evening), averaging
@@ -190,6 +191,103 @@ region. Before deploying, run `npx prisma db push` against the production
 database: it adds the nullable `Presence.peerId` column, and the same change
 is also in `prisma/migrations`.
 
-## Phase 4 — Make it better
+## Phase 4 — Make it better: Waves 👋
 
-_TODO_
+**What it is.** A quiet, consent-first hello. Tapping a dot now opens a card
+with two choices: **Wave** or **Ask to chat**.
+
+- A wave flies across the globe as a comet and lands on their dot. They get no
+  pop-up and no chime: just a 👋 on your dot and a small card.
+- If they **wave back**, you're connected straight away. You both said hi, so
+  nobody has to accept anything.
+- An unanswered wave fades after two minutes. You can also take a wave back,
+  and it disappears from their screen too.
+- **No thanks** turns down that wave. The sender's wave clears, so they can
+  try again later.
+- **Block this person** ignores their waves and requests for the rest of the
+  session, unless you reach out to them yourself later.
+
+**Why.**
+
+- **Alive.** The only way to interact with a dot used to be a full connection
+  request, which is a big ask. Most people looking at a globe of strangers
+  aren't ready to commit to a conversation; they want to know someone's there.
+  A wave is a lightweight action that makes things happen on the map: real
+  hellos crossing the globe. The entry screen's greetings are illustrative;
+  waves are the real thing.
+- **Safe.** A request interrupts with a full-screen dialog and a chime, which
+  makes it a tool for harassment (Phase 3 had to rate-limit it). A wave
+  interrupts nobody and carries no text, so there's nothing to abuse, and a
+  chat only opens once both people have opted in. "Block this person" gives
+  a one-tap block, which Phase 3 listed as missing. An unanswered wave simply
+  fades.
+
+**How it works.**
+
+- `wave` is a new signal type. The server holds it to the same bar as a
+  request (the sender is on the map, the target is online and free),
+  rate-limits it to two a minute per person, rejects any payload, and never
+  links the two people. `unwave` clears the wave between two people ("No
+  thanks", or taking a wave back). Since the sender is authenticated, it can
+  only ever clear a wave its sender is part of.
+- Waving back is a normal `request`. The first person's client sees a request
+  from someone it waved at and accepts it on its own, since it already said
+  hi, so the Phase 3 link rules didn't change. This only works because Phase 3
+  made `fromId` unforgeable: nobody can fake a wave-back from someone you
+  waved at.
+- When two requests cross (both people ask at once, a wave back crosses an
+  "Ask to chat", or two waves are noticed together), the lower public id's
+  request stands and the other side accepts it. This also fixed an older bug:
+  two crossing requests used to decline each other, so nobody got a chat
+  although both had said yes.
+- A receiver's copy of a wave expires 10 s before the sender's, so waving
+  back can't reach someone whose wave has just run out. A wave from someone
+  who has since started another chat is dropped on both sides.
+- A card that appears on its own (a wave arriving) ignores clicks for its
+  first 600 ms, so a click aimed at the card it replaced can't wave back to a
+  stranger by accident.
+- Only the two people involved ever see a wave. The comet reuses the entry
+  screen's great-circle code ([`lib/ambient.ts`](lib/ambient.ts)) in its own
+  layer ([`lib/waves.ts`](lib/waves.ts)). Arcs that cross the antimeridian are
+  drawn the short way, and reduced-motion users get the 👋 badge without the
+  animation.
+
+**Decisions.**
+
+- A direct request now takes one extra tap, because tapping a dot opens the
+  card instead of calling straight away. Offering the gentler option at the
+  moment you choose is worth that tap.
+- "No thanks" and "Block" are separate. At first, "No thanks" also blocked
+  the sender for the session, which in testing felt broken: the sender
+  couldn't wave again and didn't know why. Now a no is just a no, and
+  blocking is its own, explicit action.
+- A block lives in the browser and lasts the session. The server never learns
+  who blocked whom, which fits "nothing stored". A blocked person's requests
+  are declined just like a busy person's, so they can't tell.
+- Waves to people already in a conversation are refused rather than queued;
+  a hello that lands mid-chat is noise.
+- While I was there: on phones, the calling card and the new card now sit
+  above the Mapbox logo, which has to stay visible.
+
+**How I checked it.** The browser test now has 32 checks: A waves, B sees it
+with no prompt, B says no thanks, A waves again, B waves back, and the chat
+opens on both sides with no accept step. Two people asking each other at the
+same moment get a chat. It also
+fails on any uncaught error in a page. A production build only logs those to
+the console, and that's how a crash in the comet animation got past the
+first version of these tests. The security test has 17: you can't wave at
+someone in a conversation, or while you're in one; a flood of waves gets a
+429; and waves and unwaves can't carry text. I also ran a code review over
+the wave logic and fixed what it found, mostly races between cards, waves
+and requests. And I took screenshots of every wave state at 1440×900 and
+390×844 and adjusted from those (a quieter button after you've waved, and
+the logo fix above).
+
+**Next, with more time.**
+
+- **Block from inside a chat.** The same block, one button away in the chat
+  header.
+- **A live count of waves** ("38 hellos crossed the globe this hour") on the
+  entry screen, so its "alive" layer is backed by real, anonymous numbers.
+- **A gentle cue for waves in background tabs.** Today they're silent by
+  design, so you can miss one if Pulse isn't in front.
