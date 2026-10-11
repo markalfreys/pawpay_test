@@ -244,6 +244,43 @@ body {
   animation-duration: 1.2s;
 }
 
+/* Waves. "in": they waved at you, so a little hand waves above their dot.
+   "out": you waved and are waiting, so their dot wears a soft amber halo.
+   Busy styling wins: someone in a conversation must never look available. */
+.pulse-dot[data-wave="in"]:not([data-busy="true"])::before {
+  content: "👋";
+  position: absolute;
+  top: -13px;
+  right: -9px;
+  font-size: 15px;
+  line-height: 1;
+  pointer-events: none;
+  filter: drop-shadow(0 2px 6px rgb(0 0 0 / 0.7));
+  transform-origin: 70% 85%;
+  animation: wave-hand 1.8s ease-in-out infinite;
+}
+.pulse-dot[data-wave="out"]:not([data-busy="true"]) .pulse-core {
+  box-shadow:
+    0 0 0 2px rgb(5 6 11 / 0.85),
+    0 0 0 4px color-mix(in srgb, var(--accent-2) 75%, transparent),
+    0 0 22px 6px color-mix(in srgb, var(--accent-2) 45%, transparent);
+}
+@keyframes wave-hand {
+  0%,
+  55%,
+  100% {
+    transform: rotate(0deg);
+  }
+  10%,
+  30% {
+    transform: rotate(18deg);
+  }
+  20%,
+  40% {
+    transform: rotate(-10deg);
+  }
+}
+
 .pulse-tip {
   position: absolute;
   bottom: calc(100% - 2px);

@@ -9,12 +9,13 @@ function auth(key: string): HeadersInit {
   return { Authorization: `Bearer ${key}` };
 }
 
-// Resolves to the user's *public* position — the offset dot others see.
+// Resolves to the user's public id and *public* position — the offset dot
+// others see.
 export async function join(
   key: string,
   lat: number,
   lng: number,
-): Promise<{ lat: number; lng: number }> {
+): Promise<{ id: string; lat: number; lng: number }> {
   const res = await fetch("/api/join", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...auth(key) },
@@ -22,7 +23,7 @@ export async function join(
   });
   if (!res.ok) throw new Error(`join failed: ${res.status}`);
   const data = await res.json();
-  return { lat: data.lat, lng: data.lng };
+  return { id: data.id, lat: data.lat, lng: data.lng };
 }
 
 export async function globe(): Promise<GlobeResponse> {
@@ -40,17 +41,24 @@ export async function poll(key: string): Promise<PollResponse> {
   return res.json();
 }
 
+// Resolves to the HTTP status (0 if the network failed), so callers that care
+// can tell "not available" (409) from "slow down" (429).
 export async function sendSignal(
   key: string,
   toId: string,
   type: SignalType,
   payload?: string,
-): Promise<void> {
-  await fetch("/api/signal", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...auth(key) },
-    body: JSON.stringify({ toId, type, payload }),
-  });
+): Promise<number> {
+  try {
+    const res = await fetch("/api/signal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...auth(key) },
+      body: JSON.stringify({ toId, type, payload }),
+    });
+    return res.status;
+  } catch {
+    return 0;
+  }
 }
 
 // Fire-and-forget leave that survives the tab closing. sendBeacon can't set

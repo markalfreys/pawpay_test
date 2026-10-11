@@ -9,7 +9,7 @@
 import type { GeoJSONSource, Map as MapboxMap, Marker } from "mapbox-gl";
 
 type MapboxGL = typeof import("mapbox-gl").default;
-type LngLat = [number, number];
+export type LngLat = [number, number];
 
 // [lng, lat] of ~140 large cities, so the lights sit where people live.
 const CITIES: LngLat[] = [
@@ -100,14 +100,14 @@ const toLngLat = ([x, y, z]: Vec): LngLat => [
   Math.atan2(y, x) / RAD,
   Math.asin(Math.max(-1, Math.min(1, z))) / RAD,
 ];
-const angleDeg = (a: LngLat, b: LngLat) => {
+export const angleDeg = (a: LngLat, b: LngLat) => {
   const [ax, ay, az] = toVec(a);
   const [bx, by, bz] = toVec(b);
   return Math.acos(Math.max(-1, Math.min(1, ax * bx + ay * by + az * bz))) / RAD;
 };
 
 // Points along the great circle from a to b (spherical interpolation).
-function greatCircle(a: LngLat, b: LngLat, n: number): LngLat[] {
+export function greatCircle(a: LngLat, b: LngLat, n: number): LngLat[] {
   const va = toVec(a);
   const vb = toVec(b);
   const omega = angleDeg(a, b) * RAD;
@@ -128,8 +128,8 @@ const lerp = (a: LngLat, b: LngLat, t: number): LngLat => [
 ];
 
 // Position `idx` (fractional index) along a polyline.
-function along(coords: LngLat[], idx: number): LngLat {
-  const i = Math.min(coords.length - 2, Math.floor(idx));
+export function along(coords: LngLat[], idx: number): LngLat {
+  const i = Math.max(0, Math.min(coords.length - 2, Math.floor(idx)));
   return lerp(coords[i], coords[i + 1], idx - i);
 }
 

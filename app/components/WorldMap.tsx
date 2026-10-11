@@ -1,12 +1,19 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
 import "mapbox-gl/dist/mapbox-gl.css";
 import type { Map as MapboxMap, Marker } from "mapbox-gl";
 import { LocateFixed, Users } from "lucide-react";
-import type { PeerDot } from "@/lib/types";
+import type { PeerDot, WaveDir } from "@/lib/types";
 import { beatDelayFor, colorFor } from "@/lib/palette";
 import { startAmbient } from "@/lib/ambient";
+import { distanceKm } from "@/lib/geo";
+import { createWaveLayer, type WaveLayer } from "@/lib/waves";
+
+// "me" or a peer id.
+export type WorldMapHandle = {
+  launchWave: (from: string, to: string) => void;
+};
 
 // No fallback: a placeholder token made `!TOKEN` always false, so a missing
 // env var produced a blank map with no hint instead of the setup message below.
@@ -115,16 +122,6 @@ function setInteractive(map: MapboxMap, on: boolean) {
   map.touchZoomRotate.disableRotation();
 }
 
-function haversineKm(a: LngLat, b: LngLat): number {
-  const rad = Math.PI / 180;
-  const dLat = (b.lat - a.lat) * rad;
-  const dLng = (b.lng - a.lng) * rad;
-  const h =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLng / 2) ** 2;
-  return 2 * 6371 * Math.asin(Math.sqrt(h));
-}
-
 // Signed longitude difference folded into [-180, 180).
 const wrap180 = (d: number) => ((((d + 180) % 360) + 360) % 360) - 180;
 
@@ -133,7 +130,7 @@ const wrap180 = (d: number) => ((((d + 180) % 360) + 360) % 360) - 180;
 function frameEveryone(map: MapboxMap, me: LngLat | null, peers: PeerDot[]): boolean {
   if (!me) return false;
   const byDistance = peers
-    .map((p) => ({ p, km: haversineKm(me, p) }))
+    .map((p) => ({ p, km: distanceKm(me, p) }))
     .sort((a, b) => a.km - b.km);
   const nearest = byDistance[0];
   if (!nearest || nearest.km > NEARBY_KM) return false;
@@ -196,9 +193,11 @@ export default function WorldMap({
   peers,
   me,
   highlightId,
+  waves,
   onPeerClick,
   canConnect,
   chatOpen,
+  ref,
 }: {
   mode: MapMode;
   peers: PeerDot[];
@@ -206,16 +205,20 @@ export default function WorldMap({
   me: LngLat | null;
   // The person being called / calling / talking with.
   highlightId: string | null;
+  // Waves in flight, by peer id: badges their dot.
+  waves: Record<string, { dir: WaveDir }>;
   onPeerClick: (id: string) => void;
   canConnect: boolean;
   // On desktop the chat card covers the right edge; shift controls clear of it.
   chatOpen: boolean;
+  ref?: Ref<WorldMapHandle>;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapboxMap | null>(null);
   const markersRef = useRef<Map<string, Marker>>(new Map());
   const leavingRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const meMarkerRef = useRef<Marker | null>(null);
+  const waveLayerRef = useRef<WaveLayer | null>(null);
   const [ready, setReady] = useState(false);
 
   // Marker click handlers are bound once, so read the live click handler +
@@ -311,11 +314,38 @@ export default function WorldMap({
       markers.clear();
       meMarkerRef.current?.remove();
       meMarkerRef.current = null;
+      waveLayerRef.current?.destroy();
+      waveLayerRef.current = null;
       mapRef.current?.remove();
       mapRef.current = null;
       setReady(false);
     };
   }, []);
+
+  // Send a wave flying between two dots ("me" or a peer id). Purely visual;
+  // the page decides when. Skipped for reduced motion: the dot badge alone
+  // tells the story.
+  useImperativeHandle(
+    ref,
+    () => ({
+      launchWave(from, to) {
+        const map = mapRef.current;
+        if (!map || modeRef.current !== "live" || prefersReducedMotion()) return;
+        const at = (id: string): LngLat | null =>
+          id === "me" ? meRef.current : (peersRef.current.find((p) => p.id === id) ?? null);
+        const a = at(from);
+        const b = at(to);
+        if (!a || !b) return;
+        try {
+          waveLayerRef.current ??= createWaveLayer(map);
+        } catch {
+          return; // style not ready yet; the badge still shows
+        }
+        waveLayerRef.current.launch([a.lng, a.lat], [b.lng, b.lat], colorFor(from === "me" ? to : from));
+      },
+    }),
+    [],
+  );
 
   // Gate: slowly spin the globe. Live: hand the camera to the user.
   useEffect(() => {
@@ -465,8 +495,18 @@ export default function WorldMap({
           marker.setLngLat([peer.lng, peer.lat]);
         }
         const btn = marker.getElement().firstElementChild as HTMLButtonElement;
-        const label = preview ? "" : peer.busy ? "In a conversation" : "Say hi";
+        const wave = preview ? undefined : waves[peer.id]?.dir;
+        const label = preview
+          ? ""
+          : peer.busy
+            ? "In a conversation"
+            : wave === "in"
+              ? "Waved at you"
+              : wave === "out"
+                ? "You waved"
+                : "Say hi";
         btn.dataset.busy = String(peer.busy);
+        btn.dataset.wave = wave ?? "";
         btn.dataset.highlight = String(peer.id === highlightId);
         btn.dataset.preview = String(preview);
         btn.tabIndex = preview ? -1 : 0;
@@ -493,7 +533,7 @@ export default function WorldMap({
     return () => {
       cancelled = true;
     };
-  }, [peers, ready, mode, highlightId]);
+  }, [peers, ready, mode, highlightId, waves]);
 
   // Live camera: fly in on arrival, then re-frame whenever the set of people
   // changes (joins/leaves, not every poll) unless the user took the camera.

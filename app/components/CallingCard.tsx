@@ -18,7 +18,8 @@ export default function CallingCard({
   timeoutMs: number;
 }) {
   return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-[calc(1.25rem+var(--safe-bottom))] z-30 flex justify-center px-4">
+    // On phones the card sits above the Mapbox logo, which must stay visible.
+    <div className="pointer-events-none absolute inset-x-0 bottom-[calc(2.75rem+var(--safe-bottom))] z-30 flex justify-center px-4 md:bottom-[calc(1.25rem+var(--safe-bottom))]">
       <div
         role="status"
         aria-live="polite"

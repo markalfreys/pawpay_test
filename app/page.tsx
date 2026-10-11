@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Check, Link as LinkIcon } from "lucide-react";
+import { Check, Hand, Link as LinkIcon, MessageCircle } from "lucide-react";
 import EntryGate from "./components/EntryGate";
-import WorldMap from "./components/WorldMap";
+import WorldMap, { type WorldMapHandle } from "./components/WorldMap";
 import ConnectionPrompt from "./components/ConnectionPrompt";
 import CallingCard from "./components/CallingCard";
+import PeerCard, { distanceLabel } from "./components/PeerCard";
 import ChatPanel, { MAX_MESSAGE_LENGTH, type ChatMessage } from "./components/ChatPanel";
 import VideoPanel from "./components/VideoPanel";
 import { LivePill, Toast, Wordmark } from "./components/ui";
@@ -14,11 +15,13 @@ import { PeerSession, type DescType, type PeerControl } from "@/lib/webrtc";
 import { FAST_POLL_INTERVAL_MS, POLL_INTERVAL_MS } from "@/lib/presence";
 import { colorFor } from "@/lib/palette";
 import { playChime } from "@/lib/chime";
-import { type PeerDot, type PollResponse, type SignalMsg } from "@/lib/types";
+import { distanceKm } from "@/lib/geo";
+import { type PeerDot, type PollResponse, type SignalMsg, type WaveDir } from "@/lib/types";
 
 type Conn =
   | { kind: "idle" }
-  | { kind: "requesting"; peerId: string }
+  // `viaWave`: we're waving back, so they already said hi and will accept.
+  | { kind: "requesting"; peerId: string; viaWave?: boolean }
   | { kind: "incoming"; peerId: string }
   | { kind: "connecting"; peerId: string }
   | { kind: "connected"; peerId: string };
@@ -39,6 +42,21 @@ const GLOBE_PREVIEW_INTERVAL_MS = 5_000;
 const TYPING_SEND_INTERVAL_MS = 2_500;
 const TYPING_SHOW_MS = 4_000;
 const GATE_FADE_MS = 700;
+// How long a wave stays up before it quietly fades.
+const WAVE_TTL_MS = 120_000;
+// The receiver's copy of a wave expires this much earlier than the sender's.
+const WAVE_GRACE_MS = 10_000;
+const BOTH_WAVED = "You both waved 👋 Say hello!";
+
+// Waves: a quiet hello. Tapping a dot offers "Wave" next to "Ask to chat". A
+// wave flies across the globe and lands on their dot with no prompt, no chime
+// and no pressure. If they wave back, you're connected: both of you said hi,
+// so nobody has to accept anything. Under the hood, waving back is a normal
+// request, and the waver's client accepts it automatically. Unanswered waves
+// fade after WAVE_TTL_MS. "No thanks" turns down that wave (the sender can
+// try again later); "Block this person" ignores their waves and requests for
+// the rest of the session.
+type Wave = { dir: WaveDir; expires: number; closed?: boolean };
 
 type EndOptions = {
   // Toast to show once torn down.
@@ -73,12 +91,30 @@ export default function Home() {
   const [hasTapped, setHasTapped] = useState(false);
   const [copied, setCopied] = useState(false);
 
+  // The dot whose card is open (the user tapped it).
+  const [selected, setSelected] = useState<string | null>(null);
+
   const [conn, _setConn] = useState<Conn>({ kind: "idle" });
   const connRef = useRef<Conn>(conn);
   const setConn = (c: Conn) => {
     connRef.current = c;
     _setConn(c);
+    if (c.kind !== "idle") setSelected(null);
   };
+
+  // Waves in flight, by peer id. `closed`: the user dismissed the card for an
+  // incoming wave without answering (the badge stays on the dot).
+  const [waves, _setWaves] = useState<Record<string, Wave>>({});
+  const wavesRef = useRef(waves);
+  const setWaves = (w: Record<string, Wave>) => {
+    wavesRef.current = w;
+    _setWaves(w);
+  };
+  // People we blocked: their waves and requests are ignored.
+  const mutedRef = useRef<Set<string>>(new Set());
+  // Our own public id, to break the tie when two people wave at each other.
+  const myIdRef = useRef<string | null>(null);
+  const mapRef = useRef<WorldMapHandle>(null);
 
   const [video, _setVideo] = useState<VideoState>("none");
   const videoRef = useRef<VideoState>(video);
@@ -279,12 +315,124 @@ export default function Home() {
     }
   }
 
-  function requestConnection(peerId: string) {
+  // An incoming wave expires a little before the sender's copy, so waving
+  // back never reaches someone whose wave has just run out (they'd get a
+  // full prompt while we were told "you both said hi").
+  function putWave(peerId: string, dir: WaveDir) {
+    const ttl = dir === "in" ? WAVE_TTL_MS - WAVE_GRACE_MS : WAVE_TTL_MS;
+    setWaves({ ...wavesRef.current, [peerId]: { dir, expires: Date.now() + ttl } });
+  }
+
+  function dropWave(peerId: string) {
+    if (!(peerId in wavesRef.current)) return;
+    const next = { ...wavesRef.current };
+    delete next[peerId];
+    setWaves(next);
+  }
+
+  // Once we're talking to someone, nobody else's wave-back should connect
+  // without a prompt later on. (Their side drops our wave too: see the
+  // busy check in handlePoll.)
+  function dropOutgoingWaves() {
+    const current = Object.entries(wavesRef.current);
+    const next = current.filter(([, w]) => w.dir !== "out");
+    if (next.length !== current.length) setWaves(Object.fromEntries(next));
+  }
+
+  // Tapping a dot opens its card; the card offers wave / ask to chat. It also
+  // closes a finished chat's transcript (which would hide the card), as
+  // tapping always did.
+  function selectPeer(peerId: string) {
     if (connRef.current.kind !== "idle") return;
+    if (ended) freshConversation();
+    setHasTapped(true);
+    setSelected(peerId);
+  }
+
+  async function waveAt(peerId: string) {
+    if (connRef.current.kind !== "idle") return;
+    // Reaching out yourself overrides an earlier "No thanks".
+    mutedRef.current.delete(peerId);
+    const existing = wavesRef.current[peerId];
+    if (existing?.dir === "in") return waveBack(peerId);
+    if (existing?.dir === "out") return;
+    putWave(peerId, "out");
+    mapRef.current?.launchWave("me", peerId);
+    const status = await sendSignal(sessionKey, peerId, "wave");
+    if (status === 200) return;
+    dropWave(peerId);
+    showNotice(
+      status === 429
+        ? "That's a lot of waving. Give it a minute."
+        : status === 0
+          ? "Couldn't send your wave. Check your connection."
+          : "They just got busy. Try someone else?",
+    );
+  }
+
+  // They waved first, so waving back connects straight away.
+  function waveBack(peerId: string) {
+    if (connRef.current.kind !== "idle") return;
+    dropWave(peerId);
+    mapRef.current?.launchWave("me", peerId);
+    requestConnection(peerId, true);
+  }
+
+  function askToChat(peerId: string) {
+    dropWave(peerId);
+    requestConnection(peerId);
+  }
+
+  // Turn down this wave. Their side clears it too, so they're free to try
+  // again later (the server limits how often).
+  function noThanks(peerId: string) {
+    void sendSignal(sessionKey, peerId, "unwave");
+    dropWave(peerId);
+    if (selected === peerId) setSelected(null);
+  }
+
+  // A "no" that sticks: no more waves or requests from them this session
+  // (unless you reach out to them yourself later).
+  function block(peerId: string) {
+    mutedRef.current.add(peerId);
+    noThanks(peerId);
+    showNotice("Blocked. You won't hear from them again this session.");
+  }
+
+  // Withdraw a wave; their card for it goes away too.
+  function takeBack(peerId: string) {
+    void sendSignal(sessionKey, peerId, "unwave");
+    dropWave(peerId);
+    if (selected === peerId) setSelected(null);
+  }
+
+  // Closing an incoming wave's card keeps the wave (the 👋 stays on their
+  // dot). If it had covered a "You waved" card, that one comes back.
+  function closeCard(peerId: string) {
+    if (selected === peerId) setSelected(null);
+    const w = wavesRef.current[peerId];
+    if (w?.dir === "in") setWaves({ ...wavesRef.current, [peerId]: { ...w, closed: true } });
+  }
+
+  function requestConnection(peerId: string, viaWave = false) {
+    if (connRef.current.kind !== "idle") return;
+    mutedRef.current.delete(peerId);
     freshConversation();
     setHasTapped(true);
-    setConn({ kind: "requesting", peerId });
-    void sendSignal(sessionKey, peerId, "request");
+    setConn({ kind: "requesting", peerId, viaWave });
+    // A rejected request (rate limit, or our row was just reaped) never
+    // reaches them: say so now instead of "Calling…" for 30 s.
+    void sendSignal(sessionKey, peerId, "request").then((status) => {
+      if (status === 200) return;
+      const c = connRef.current;
+      if (c.kind !== "requesting" || c.peerId !== peerId) return;
+      teardown({
+        notice:
+          status === 429
+            ? "That's a lot of requests. Give it a minute."
+            : "Couldn't reach them. Try again in a moment.",
+      });
+    });
     clearConnTimer();
     connTimer.current = setTimeout(() => {
       if (
@@ -302,12 +450,29 @@ export default function Home() {
 
   function acceptIncoming() {
     if (connRef.current.kind !== "incoming") return;
-    const peerId = connRef.current.peerId;
+    acceptFrom(connRef.current.peerId);
+  }
+
+  function acceptFrom(peerId: string, viaWave = false) {
     freshConversation();
+    dropOutgoingWaves();
     startPeer(peerId, false);
-    void sendSignal(sessionKey, peerId, "accept");
+    // The server refuses an accept when they've already given up (cancelled
+    // or timed out). Say so instead of "Connecting…" until the timeout.
+    void sendSignal(sessionKey, peerId, "accept").then((status) => {
+      if (status === 200) return;
+      const c = connRef.current;
+      if (c.kind !== "connecting" || c.peerId !== peerId) return;
+      teardown({
+        notice:
+          status === 0
+            ? "Couldn't reach Pulse. Check your connection."
+            : "They're no longer waiting.",
+      });
+    });
     setConn({ kind: "connecting", peerId });
     armConnectTimeout(peerId);
+    if (viaWave) addSystem(BOTH_WAVED);
   }
 
   function declineIncoming() {
@@ -417,10 +582,28 @@ export default function Home() {
   function processSignal(sig: SignalMsg) {
     switch (sig.type) {
       case "request": {
-        if (connRef.current.kind === "idle") {
-          setConn({ kind: "incoming", peerId: sig.fromId });
+        const from = sig.fromId;
+        const c = connRef.current;
+        if (c.kind === "requesting" && c.peerId === from) {
+          // We asked each other at the same moment: a wave back crossing an
+          // "Ask to chat", or two waves noticed at once. Both said yes, so
+          // connect instead of each declining the other: the lower id's
+          // request stands and the other side accepts it.
+          const me = myIdRef.current;
+          if (me && me > from) acceptFrom(from, c.viaWave);
+          break;
+        }
+        if (c.kind !== "idle" || mutedRef.current.has(from)) {
+          void sendSignal(sessionKey, from, "decline");
+        } else if (wavesRef.current[from]?.dir === "out") {
+          // We waved and they waved back: both said hi, so no prompt.
+          dropWave(from);
+          mapRef.current?.launchWave(from, "me");
+          acceptFrom(from, true);
         } else {
-          void sendSignal(sessionKey, sig.fromId, "decline");
+          // A direct ask replaces any wave of theirs.
+          dropWave(from);
+          setConn({ kind: "incoming", peerId: from });
         }
         break;
       }
@@ -430,7 +613,38 @@ export default function Home() {
           startPeer(sig.fromId, true);
           setConn({ kind: "connecting", peerId: sig.fromId });
           armConnectTimeout(sig.fromId);
+          dropOutgoingWaves();
+          if (c.viaWave) addSystem(BOTH_WAVED);
         }
+        break;
+      }
+      case "wave": {
+        const from = sig.fromId;
+        if (mutedRef.current.has(from)) break;
+        const c = connRef.current;
+        // Already asking or talking to them: the wave adds nothing (and
+        // would come back as a stale card once the chat ends).
+        if (c.kind !== "idle" && c.peerId === from) break;
+        mapRef.current?.launchWave(from, "me");
+        if (wavesRef.current[from]?.dir === "out" && c.kind === "idle") {
+          // We waved at each other at the same moment. Both sides ask, and
+          // the crossing requests resolve in case "request".
+          dropWave(from);
+          requestConnection(from, true);
+          break;
+        }
+        // Otherwise it waits on their dot, including when we're busy right
+        // now, so a wave never gets lost.
+        putWave(from, "in");
+        break;
+      }
+      case "unwave": {
+        // They took their wave back, or said no thanks to ours. Either way
+        // the wave between us is gone; if it was ours, we can try again later.
+        const w = wavesRef.current[sig.fromId];
+        if (!w) break;
+        dropWave(sig.fromId);
+        if (w.dir === "out") showNotice("They can't talk right now.");
         break;
       }
       case "decline": {
@@ -474,6 +688,24 @@ export default function Home() {
     setPeers(data.peers);
     for (const s of data.signals) processSignal(s);
 
+    // Waves fade after their TTL. A wave from someone who has since started
+    // another conversation is void: they dropped it on their side when they
+    // connected. Someone briefly missing from a poll keeps their wave (one
+    // miss can be a transient read; cards and badges only show for people
+    // on the map anyway).
+    const now = Date.now();
+    const online = new Map(data.peers.map((p) => [p.id, p]));
+    const current = Object.entries(wavesRef.current);
+    const live = current.filter(
+      ([id, w]) => w.expires > now && !(w.dir === "in" && online.get(id)?.busy),
+    );
+    if (live.length !== current.length) setWaves(Object.fromEntries(live));
+    // Close the card of someone who left or got busy.
+    if (selected) {
+      const p = online.get(selected);
+      if (!p || p.busy) setSelected(null);
+    }
+
     // Our own row was reaped (e.g. the tab sat throttled in the background
     // longer than STALE_MS). Re-join so we're visible again instead of being
     // an invisible ghost who can see others but can't be seen or reached.
@@ -481,7 +713,10 @@ export default function Home() {
       rejoining.current = true;
       const { lat, lng } = locationRef.current;
       join(sessionKey, lat, lng)
-        .then(setPublicMe)
+        .then(({ id, lat, lng }) => {
+          myIdRef.current = id;
+          setPublicMe({ lat, lng });
+        })
         .catch(() => {})
         .finally(() => {
           rejoining.current = false;
@@ -596,7 +831,8 @@ export default function Home() {
   async function handleReady(lat: number, lng: number) {
     const pub = await join(sessionKey, lat, lng);
     locationRef.current = { lat, lng };
-    setPublicMe(pub);
+    myIdRef.current = pub.id;
+    setPublicMe({ lat: pub.lat, lng: pub.lng });
     setPhase("live");
     // Keep the gate mounted while it fades out over the camera fly-in.
     setTimeout(() => setGateMounted(false), GATE_FADE_MS);
@@ -605,19 +841,41 @@ export default function Home() {
   const inChat = conn.kind === "connecting" || conn.kind === "connected";
   const chatOpen = inChat || ended !== null;
   const chatPeerId = inChat ? conn.peerId : (ended?.peerId ?? null);
-  const highlightId = conn.kind !== "idle" ? conn.peerId : null;
+
+  // The card at the bottom: the dot the user tapped, or else a wave they
+  // haven't answered or closed, from someone on the map and free. Oldest
+  // first, so a wave arriving later never swaps the card out from under a
+  // click. A "You waved" card is only waiting, so an incoming wave takes its
+  // place (it comes back afterwards; PeerCard briefly ignores clicks on a
+  // card that appeared on its own). Only while idle on the map.
+  const onMap = phase === "live" && conn.kind === "idle" && !chatOpen;
+  const nextWave = Object.entries(waves)
+    .filter(
+      ([id, w]) => w.dir === "in" && !w.closed && peers.some((p) => p.id === id && !p.busy),
+    )
+    .sort(([, a], [, b]) => a.expires - b.expires)[0]?.[0];
+  const waiting = selected !== null && waves[selected]?.dir === "out";
+  const cardId = onMap
+    ? ((waiting ? nextWave : undefined) ?? selected ?? nextWave ?? null)
+    : null;
+  const cardPeer = cardId ? peers.find((p) => p.id === cardId) : undefined;
+  const cardWave = cardId ? waves[cardId] : undefined;
+  const away = cardPeer && publicMe ? distanceLabel(distanceKm(publicMe, cardPeer)) : "";
+
+  const highlightId = conn.kind !== "idle" ? conn.peerId : cardPeer ? cardPeer.id : null;
   const others = peers.length;
-  const showHint =
-    phase === "live" && conn.kind === "idle" && !chatOpen && (others === 0 || !hasTapped);
+  const showHint = onMap && !cardPeer && (others === 0 || !hasTapped);
 
   return (
     <main data-phase={phase} className="fixed inset-0 overflow-hidden bg-bg text-ink">
       <WorldMap
+        ref={mapRef}
         mode={phase}
         peers={phase === "live" ? peers : preview}
         me={phase === "live" ? publicMe : null}
         highlightId={highlightId}
-        onPeerClick={requestConnection}
+        waves={waves}
+        onPeerClick={selectPeer}
         canConnect={conn.kind === "idle"}
         chatOpen={chatOpen}
       />
@@ -662,11 +920,62 @@ export default function Home() {
 
       {notice && <Toast key={notice} text={notice} />}
 
+      {cardPeer && (
+        <PeerCard
+          key={`${cardPeer.id}:${cardWave?.dir ?? "none"}`}
+          color={colorFor(cardPeer.id)}
+          autoFocus={cardPeer.id === selected}
+          expiresAt={cardWave?.expires}
+          ttlMs={cardWave ? WAVE_TTL_MS : undefined}
+          onClose={() => closeCard(cardPeer.id)}
+          {...(cardWave?.dir === "in"
+            ? {
+                title: "Someone waved at you 👋",
+                subtitle: away,
+                hint: "Wave back and you're talking.",
+                primary: {
+                  label: "Wave back",
+                  icon: <Hand className="h-4 w-4" />,
+                  onClick: () => waveBack(cardPeer.id),
+                },
+                secondary: { label: "No thanks", onClick: () => noThanks(cardPeer.id) },
+                extra: { label: "Block this person", onClick: () => block(cardPeer.id) },
+              }
+            : cardWave?.dir === "out"
+              ? {
+                  title: "You waved 👋",
+                  subtitle: "If they wave back, you're talking",
+                  secondary: { label: "Take it back", onClick: () => takeBack(cardPeer.id) },
+                  primary: {
+                    label: "Ask to chat",
+                    icon: <MessageCircle className="h-4 w-4" />,
+                    onClick: () => askToChat(cardPeer.id),
+                    quiet: true,
+                  },
+                }
+              : {
+                  title: "Say hi",
+                  subtitle: away,
+                  hint: "A wave is a quiet hello, with no pop-up on their side. If they wave back, you're talking.",
+                  primary: {
+                    label: "Wave",
+                    icon: <Hand className="h-4 w-4" />,
+                    onClick: () => void waveAt(cardPeer.id),
+                  },
+                  secondary: {
+                    label: "Ask to chat",
+                    icon: <MessageCircle className="h-4 w-4" />,
+                    onClick: () => askToChat(cardPeer.id),
+                  },
+                })}
+        />
+      )}
+
       {conn.kind === "requesting" && (
         <CallingCard
           color={colorFor(conn.peerId)}
-          title="Calling…"
-          subtitle="Waiting for them to say yes"
+          title={conn.viaWave ? "Waving back…" : "Calling…"}
+          subtitle={conn.viaWave ? "They said hi first. Connecting…" : "Waiting for them to say yes"}
           onCancel={cancelRequest}
           timeoutMs={REQUEST_TIMEOUT_MS}
         />
