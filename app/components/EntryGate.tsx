@@ -1,11 +1,34 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowRight, Lock, MapPin, Sparkles } from "lucide-react";
 import { Spinner, Wordmark } from "./ui";
 import { primeChime } from "@/lib/chime";
 
 type Status = "idle" | "locating" | "joining" | "error";
+
+// Why location failed, worded for what the user can actually do. After
+// "Never allow", a script can't bring the browser's prompt back. Chrome's
+// <geolocation> element (a button the browser draws itself) can, so where
+// it exists we offer it; elsewhere we explain where to undo the block.
+const LOCATION_DISMISSED =
+  "Pulse needs your location to place your dot. It's offset 1–3 km and never stored. Press Enter Pulse and choose Allow.";
+const LOCATION_BLOCKED_BUTTON =
+  "Location is blocked for this site. Press the button below and choose Allow to let Pulse place your dot.";
+const LOCATION_BLOCKED =
+  "Location is blocked for this site, so your browser won't ask again. Click the icon at the left of the address bar and set Location to Allow (or Ask). Pulse will pick it up from there.";
+
+const hasGeolocationElement = () => "HTMLGeolocationElement" in window;
+const LOCATION_DENIED =
+  "Pulse needs your location to place your dot. It's offset 1–3 km and never stored — allow it in your browser's site settings, then try again.";
+
+async function geoPermission(): Promise<PermissionStatus | null> {
+  try {
+    return (await navigator.permissions?.query({ name: "geolocation" })) ?? null;
+  } catch {
+    return null; // no Permissions API (older Safari)
+  }
+}
 
 // The first screen, laid over the spinning live globe: you can see real
 // people glowing on it before you decide to join.
@@ -19,26 +42,94 @@ export default function EntryGate({
 }) {
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string>("");
+  // Bumped on every failure so the message pops again even when the text is
+  // the same (a click on a blocked site fails instantly).
+  const [attempt, setAttempt] = useState(0);
+  // Location is blocked and the browser has a <geolocation> button to undo it.
+  const [recovery, setRecovery] = useState(false);
+  // Location can arrive from more than one place (Enter Pulse, the
+  // <geolocation> button, the permission watcher). Join once.
+  const joining = useRef(false);
 
   function fail(message: string) {
     setStatus("error");
     setError(message);
+    setAttempt((n) => n + 1);
+  }
+
+  // After a refusal, watch the permission: allowing it in site settings
+  // carries on by itself, and resetting it to "Ask" means the next click
+  // shows the browser's prompt again.
+  const watched = useRef<PermissionStatus | null>(null);
+  const enterRef = useRef(enter);
+  useEffect(() => {
+    enterRef.current = enter;
+  });
+  useEffect(
+    () => () => {
+      if (watched.current) watched.current.onchange = null;
+    },
+    [],
+  );
+  function watch(permission: PermissionStatus) {
+    if (watched.current) return;
+    watched.current = permission;
+    permission.onchange = () => {
+      if (permission.state === "granted") enterRef.current();
+      else if (permission.state === "prompt") {
+        setStatus("idle");
+        setError("");
+      }
+    };
   }
 
   async function located(pos: GeolocationPosition) {
+    if (joining.current) return;
+    joining.current = true;
     setStatus("joining");
     try {
       await onReady(pos.coords.latitude, pos.coords.longitude);
     } catch {
+      joining.current = false;
       fail("Couldn't reach Pulse. Check your connection and try again.");
     }
   }
+  const locatedRef = useRef(located);
+  useEffect(() => {
+    locatedRef.current = located;
+  });
 
-  function locationError(err: GeolocationPositionError) {
+  // The <geolocation> button reports through a "location" event: a position
+  // once they allow, or an error if they refuse again.
+  function geolocationRef(el: HTMLGeolocationElement | null) {
+    if (!el) return;
+    const onLocation = () => {
+      if (el.position) void locatedRef.current(el.position);
+      else setAttempt((n) => n + 1);
+    };
+    el.addEventListener("location", onLocation);
+    return () => el.removeEventListener("location", onLocation);
+  }
+
+  async function locationError(err: GeolocationPositionError) {
+    if (err.code !== err.PERMISSION_DENIED) {
+      fail("Couldn't get your location. Please try again.");
+      return;
+    }
+    // "denied": they chose Never allow / Block. "prompt": they only closed
+    // the popup, so the next click asks again.
+    const permission = await geoPermission();
+    if (permission) watch(permission);
+    const blocked = permission?.state === "denied";
+    setRecovery(blocked && hasGeolocationElement());
     fail(
-      err.code === err.PERMISSION_DENIED
-        ? "Pulse needs your location to place your dot. It's offset 1–3 km and never stored — allow it in your browser's site settings, then try again."
-        : "Couldn't get your location. Please try again.",
+      blocked
+        ? hasGeolocationElement()
+          ? LOCATION_BLOCKED_BUTTON
+          : LOCATION_BLOCKED
+        : permission?.state === "prompt"
+          ? LOCATION_DISMISSED
+          : LOCATION_DENIED,
     );
   }
 
@@ -131,11 +222,21 @@ export default function EntryGate({
 
         {status === "error" && (
           <p
+            key={attempt}
             role="alert"
             className="animate-pop mt-4 max-w-md rounded-2xl border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-[#ffb4bf]"
           >
             {error}
           </p>
+        )}
+        {status === "error" && recovery && (
+          // Drawn by the browser (icon and label included); pressing it brings
+          // the location prompt back even after "Never allow". Chrome only
+          // accepts solid, high-contrast, full-opacity styling on it.
+          <geolocation
+            ref={geolocationRef}
+            className="mt-3 h-11 rounded-full bg-accent-2 px-5 text-sm font-semibold text-[#1b0b10]"
+          />
         )}
 
         <ul

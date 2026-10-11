@@ -21,7 +21,7 @@ const instrumentSerif = Instrument_Serif({
 });
 
 export const metadata: Metadata = {
-  title: "Pulse — a living globe of strangers",
+  title: "Pulse - a living globe of strangers",
   description:
     "Every online person is a glowing dot on the globe. Tap one, start talking. No accounts, nothing stored.",
   openGraph: {
