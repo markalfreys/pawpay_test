@@ -55,8 +55,9 @@ in `globals.css` was overriding it.
 
 - **Entry.** Instead of a black page with a button, you land on the real
   globe, slowly spinning (Mapbox globe projection with atmosphere and stars),
-  with everyone online glowing on it before you join: "5 people online now".
-  It starts facing your side of the planet, using your timezone as a free,
+  with everyone online glowing on it before you join. (An "N people online
+  now" badge sat above the logo at first; I removed it because it read like
+  a template landing page, and the dots already show it.) It starts facing your side of the planet, using your timezone as a free,
   permission-free hint. A new read-only `/api/globe` feeds it: anonymous (no
   ids), coordinates rounded on top of the privacy offset, and CDN-cached for a
   few seconds so gate traffic doesn't hit the database. Copy is short and
@@ -69,8 +70,7 @@ in `globals.css` was overriding it.
     along a great-circle arc, then a ripple and a greeting in a local
     language ("hola", "こんにちは", "kumusta"…), a nod to "Say hello."
   - I kept it honest: these are much smaller than the heartbeat dots of real
-    people, never clickable, and the "N online now" count stays truthful.
-    The layer fades out the moment you enter, so the live map only ever
+    people and never clickable. The layer fades out the moment you enter, so the live map only ever
     shows real people.
   - It renders with Mapbox layers updated at ~30 fps and only animates the
     side of the globe facing you. Reduced-motion users get static lights.

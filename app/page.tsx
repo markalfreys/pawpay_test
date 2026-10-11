@@ -72,7 +72,6 @@ export default function Home() {
   const [phase, setPhase] = useState<"gate" | "live">("gate");
   const [gateMounted, setGateMounted] = useState(true);
   const [preview, setPreview] = useState<PeerDot[]>([]);
-  const [previewOnline, setPreviewOnline] = useState<number | null>(null);
   // This tab's secret session key: our credential for every API call. Others
   // only ever see the public id the server derives from it.
   const [sessionKey] = useState(() => crypto.randomUUID());
@@ -757,7 +756,6 @@ export default function Home() {
       try {
         const g = await globe();
         if (!active) return;
-        setPreviewOnline(g.online);
         // Key by (rounded) position: stable for a person's whole session, so
         // dots don't reshuffle between refreshes.
         const byPos = new Map<string, PeerDot>();
@@ -881,7 +879,7 @@ export default function Home() {
       />
 
       {gateMounted && (
-        <EntryGate onReady={handleReady} online={previewOnline} leaving={phase === "live"} />
+        <EntryGate onReady={handleReady} leaving={phase === "live"} />
       )}
 
       {phase === "live" && (

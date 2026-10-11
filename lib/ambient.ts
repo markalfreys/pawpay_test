@@ -4,8 +4,8 @@
 // "message" crossing the globe: a comet along a great-circle arc, a ripple
 // and a little greeting where it lands. It is NOT user data: these points
 // are much smaller than the heartbeat dots of real people online, never
-// clickable, the "N online now" count stays truthful, and the whole layer is
-// removed the moment you enter the live map.
+// clickable, and the whole layer is removed the moment you enter the live
+// map.
 import type { GeoJSONSource, Map as MapboxMap, Marker } from "mapbox-gl";
 
 type MapboxGL = typeof import("mapbox-gl").default;

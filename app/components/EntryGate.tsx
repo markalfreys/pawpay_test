@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { ArrowRight, Lock, MapPin, Sparkles } from "lucide-react";
-import { LivePill, Spinner, Wordmark } from "./ui";
+import { Spinner, Wordmark } from "./ui";
 import { primeChime } from "@/lib/chime";
 
 type Status = "idle" | "locating" | "joining" | "error";
@@ -11,12 +11,9 @@ type Status = "idle" | "locating" | "joining" | "error";
 // people glowing on it before you decide to join.
 export default function EntryGate({
   onReady,
-  online,
   leaving,
 }: {
   onReady: (lat: number, lng: number) => Promise<void>;
-  // People on the globe right now (null until the first preview arrives).
-  online: number | null;
   // Fading out while the camera flies in.
   leaving: boolean;
 }) {
@@ -87,21 +84,7 @@ export default function EntryGate({
 
       {/* Widths mirror GATE_COPY_REM / GATE_COPY_2XL_REM in WorldMap.tsx. */}
       <div className="gate-copy relative w-full max-w-xl px-6 pb-[calc(3.5rem+var(--safe-bottom))] md:w-[30rem] md:max-w-none md:px-0 md:pb-0 2xl:w-[36rem]">
-        <div className="animate-rise" style={{ animationDelay: "0.1s" }}>
-          <LivePill
-            online={online ?? 0}
-            label={
-              online === null
-                ? "Tuning in…"
-                : online === 0
-                  ? "Be the first to feel the connection"
-                  : `${online} ${online === 1 ? "person" : "people"} online now`
-            }
-            className="glass"
-          />
-        </div>
-
-        <h1 className="animate-rise mt-6" style={{ animationDelay: "0.2s" }}>
+        <h1 className="animate-rise" style={{ animationDelay: "0.2s" }}>
           <Wordmark size="lg" />
         </h1>
 
