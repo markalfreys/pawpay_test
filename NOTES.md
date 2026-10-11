@@ -134,7 +134,61 @@ centring on Africa, and an orb pulse that clipped inside its card.
 
 ## Phase 3 — Make it secure
 
-_TODO_
+**How I reviewed it:** I read every route as an attacker who starts with only
+what the app hands out. That turned out to be a lot, because `/api/poll`
+returns every online person's id. I then wrote
+[`e2e/api-security.mjs`](e2e/api-security.mjs) (`npm run test:security`):
+14 checks, each replaying one of the attacks below against a running
+instance. All pass, and the two-user browser test still passes 23/23.
+
+Ranked by what an attacker could actually do to Pulse, not by CVE score:
+
+| # | Severity | Issue | Fix |
+|---|----------|-------|-----|
+| 1 | Critical | **The id on every dot was also the password.** `/api/poll` sends every peer's id to everyone, and every endpoint trusted whatever id the caller sent. One poll was enough to: drain anyone's mailbox (`/api/poll?id=`), intercepting their connection requests, SDP and ICE candidates (which carry IP addresses) and answering in their place; send signals as anyone (`fromId` came from the body); kick anyone off the map (`/api/leave`); and move anyone's dot (`/api/join` upserts) | Each tab now has a secret key, and its public id is a SHA-256 hash of that key ([`lib/session.ts`](lib/session.ts)). Every call authenticates with the key in the `Authorization` header (not the URL, so it stays out of logs). The server works out who you are from the key and ignores any id you claim. The public id can't be turned back into the key. Because the id is derived rather than issued, there's no new secret to configure and no extra table |
+| 2 | High | **Signals weren't checked against any relationship.** Even as yourself you could: send a forged `accept` to anyone, marking you both busy (one call per user turns the whole map "busy"); hang up anyone, because `end` freed both ids unconditionally (also a real bug: someone whose request to you timed out freed you mid-chat with someone else); and send `offer`/`ice` to someone who never accepted, against "no way to message someone before they accept" | The server now tracks who is linked to whom (`Presence.peerId`) and relays only signals that fit. `request` goes only to someone online and free, and only from someone on the map. `accept`/`decline` go only to someone whose request to you is pending. `offer`/`answer`/`ice` go only within an accepted connection, and `end` only to whoever you're linked to. `accept` links both sides in one conditional `UPDATE`. Anything else gets a 409 and is never stored |
+| 3 | High | **The 1–3 km privacy offset could be averaged away.** Every join drew a fresh random offset, and the client re-joins under the same id whenever its row is reaped (e.g. a background tab). The offsets point in random directions, so their average converges on the real location: roughly 0.4 km off after 25 samples, 0.2 km after 100. With #1, an attacker could collect samples quickly by kicking the victim every few seconds | The offset is now seeded from the session key. It's still new every session, as the requirements say, but identical for every re-join within one, so there's nothing to average |
+| 4 | Medium | **No rate limits.** One script could flood the database (each poll is 3 queries) or ring the same person over and over (each request means a prompt, a chime and a vibration) | Per-IP limits on join, poll, signal and connection requests, plus at most 3 requests a minute to the same person ([`lib/ratelimit.ts`](lib/ratelimit.ts)) |
+| 5 | Medium | **Signal payloads were relayed as-is**: any string up to 64 KB, and ids weren't validated | Ids must be well-formed public ids. Only `offer`/`answer`/`ice` carry a payload, and it must have the right shape. The server rebuilds it from just the expected fields before relaying it, so a stranger can't push arbitrary data through. Max 16 KB |
+| 6 | Medium | **Next.js 16.2.7 had critical advisories**, including unauthenticated RCE in the image optimizer, plus SSRF and DoS issues. Real exposure here was low: Pulse doesn't use `next/image`, `next/og`, AVIF or Windows hosting. But `/_next/image` is on by default and the patch costs nothing | Upgraded to 16.3.8, which fixes every listed advisory (I chose it over 16.4.0, which has the same fixes but came out only five days ago) |
+| 7 | Low | **No framing protection** on a page that asks for your camera, so another site could frame it and trick you into clicking Accept (clickjacking) | `frame-ancestors 'none'` and `X-Frame-Options: DENY`; a `Permissions-Policy` that limits camera, mic and location to Pulse itself; `nosniff` |
+
+**Known, not fixed**
+
+- **Your IP address goes to whoever you connect with.** That's inherent to
+  peer-to-peer WebRTC. Hiding it needs a TURN relay
+  (`iceTransportPolicy: "relay"`), an external service the requirements rule
+  out. It now happens only after you accept. Before #1 and #2, anyone could
+  collect strangers' ICE candidates.
+- **No block or report.** That's a missing safety feature rather than an API
+  bug; it's a Phase 4 candidate.
+- **Averaging across sessions.** Someone who uses Pulse often from home gets
+  a new offset each session. If an observer can tell those sessions are the
+  same person (say, the only dot in a small town every evening), averaging
+  still works. The next step would be to snap the real location to a grid of
+  about 1 km before applying the offset, so the average only reveals the grid
+  cell. Cells up to about 1.4 km still keep every dot within the required
+  1–3 km.
+- **Rate limits are per server instance.** They stop one noisy client. For
+  real volumetric abuse, add Vercel Firewall rate-limit rules, which are built
+  into Vercel, so no extra service.
+- **Locations can't be verified.** Anyone can put their dot anywhere.
+  Accepted.
+- **No strict Content-Security-Policy.** A `script-src` policy needs
+  per-request nonces (via `proxy.ts`) plus the worker and blob allowances
+  Mapbox needs. Worth doing, but not quick to get right.
+- **The Mapbox token is public by design** (`NEXT_PUBLIC_`). Restrict it to
+  the production URL in the Mapbox dashboard.
+- **19 npm audit findings remain: none critical, and none in the deployed
+  app.** They're in the Prisma CLI (its local dev database pulls in `hono`,
+  `mysql2` and others), ESLint, and build-time CSS tooling. Prisma's suggested
+  fix is a downgrade to v6, so I left them.
+
+**Cost and rollout.** Each signal now does one extra database lookup to check
+the link, which takes milliseconds when Vercel and Neon are in the same
+region. Before deploying, run `npx prisma db push` against the production
+database: it adds the nullable `Presence.peerId` column, and the same change
+is also in `prisma/migrations`.
 
 ## Phase 4 — Make it better
 
