@@ -19,6 +19,10 @@ export const LIMITS = {
   request: [30, 60_000],
   // Per IP and target, so one person can't be flooded with prompts.
   requestTarget: [3, 60_000],
+  // Per IP. Waves are quiet, but still land on someone's screen.
+  wave: [20, 60_000],
+  // Per IP and target: a wave lasts two minutes, so twice a minute is plenty.
+  waveTarget: [2, 60_000],
 } satisfies Record<string, [number, number]>;
 
 type Window = { count: number; resetAt: number };

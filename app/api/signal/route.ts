@@ -16,6 +16,8 @@ const VALID_TYPES: SignalType[] = [
   "answer",
   "ice",
   "end",
+  "wave",
+  "unwave",
 ];
 
 // Only the first handshake goes through the server (a data-channel-only SDP
@@ -35,6 +37,13 @@ const MAX_PAYLOAD = 16 * 1024;
 //   decline           only to someone whose request to you is pending
 //   offer/answer/ice  only between two people who are connected
 //   end               only to the person you're linked to; frees both sides
+//   wave              to anyone online and free; no link, no payload. Waving
+//                     back is a normal request that the waver's client accepts
+//                     on its own (it already said hi), so consent still comes
+//                     from both sides and nothing here can be forged.
+//   unwave            to anyone; no link, no payload. Clears the wave between
+//                     sender and recipient (taken back, or "No thanks"). It
+//                     can only ever clear a wave involving its real sender.
 // Before this, any client could mark any two users busy with a forged
 // "accept", free someone mid-chat with "end", or push SDP and ICE at a
 // stranger who never accepted. Signals that don't fit get a 409 and are never
@@ -140,6 +149,35 @@ export async function POST(request: NextRequest) {
         }),
       ]);
       if (mine.count + theirs.count === 0) return rejected("not linked to this user");
+      break;
+    }
+
+    case "wave": {
+      const spam =
+        rateLimit(`wave:${ip}`, ...LIMITS.wave) ??
+        rateLimit(`wave:${ip}:${toId}`, ...LIMITS.waveTarget);
+      if (spam) return spam;
+
+      // You're on the map and free (a wave from someone mid-chat could never
+      // be answered), and they're online and free.
+      const [sender, target] = await Promise.all([
+        prisma.presence.findUnique({ where: { id: me }, select: { busy: true } }),
+        prisma.presence.findUnique({
+          where: { id: toId },
+          select: { busy: true, lastSeen: true },
+        }),
+      ]);
+      if (!sender) return rejected("join first");
+      if (sender.busy) return rejected("you're in a conversation");
+      if (!target || target.busy || target.lastSeen.getTime() < Date.now() - STALE_MS) {
+        return rejected("not available");
+      }
+      break;
+    }
+
+    case "unwave": {
+      const sender = await prisma.presence.findUnique({ where: { id: me }, select: { id: true } });
+      if (!sender) return rejected("join first");
       break;
     }
 
