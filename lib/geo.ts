@@ -1,16 +1,19 @@
 // Privacy offset: move a real coordinate 1–3 km in a random direction so the
-// dot is placed *near* the user, never at their exact location. A fresh random
-// offset is generated each session (this runs once per join), so the same user
-// lands somewhere different every time.
+// dot is placed *near* the user, never at their exact location. The randomness
+// comes from `seed` (two numbers in [0, 1), from offsetSeed() in
+// lib/session.ts): different for every session, so the same user lands
+// somewhere different every time, but fixed within a session, so re-joins
+// don't hand out fresh samples to average.
 
 const KM_PER_DEG_LAT = 111.32;
 
 export function applyPrivacyOffset(
   lat: number,
   lng: number,
+  seed: [number, number],
 ): { lat: number; lng: number } {
-  const distanceKm = 1 + Math.random() * 2; // 1–3 km
-  const bearing = Math.random() * 2 * Math.PI; // random direction
+  const distanceKm = 1 + seed[0] * 2; // 1–3 km
+  const bearing = seed[1] * 2 * Math.PI; // random direction
 
   const dLat = (distanceKm * Math.cos(bearing)) / KM_PER_DEG_LAT;
   const latRad = (lat * Math.PI) / 180;
@@ -31,6 +34,20 @@ function clamp(v: number, min: number, max: number): number {
 function wrapLng(lng: number): number {
   // Keep longitude in [-180, 180].
   return ((((lng + 180) % 360) + 360) % 360) - 180;
+}
+
+// Great-circle distance in km.
+export function distanceKm(
+  a: { lat: number; lng: number },
+  b: { lat: number; lng: number },
+): number {
+  const rad = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * rad;
+  const dLng = (b.lng - a.lng) * rad;
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLng / 2) ** 2;
+  return 2 * 6371 * Math.asin(Math.sqrt(h));
 }
 
 export function isValidLatLng(lat: unknown, lng: unknown): boolean {

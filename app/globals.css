@@ -1,79 +1,600 @@
 @import "tailwindcss";
 
+/* ───────────────────────── Design tokens ─────────────────────────
+   Pulse is always dark: it's a night-side view of a living globe. One warm
+   accent (coral → amber, a "heartbeat" glow) carries every primary action. */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg: #05060b;
+  --ink: #eef0f7;
+  --muted: #9097ad;
+  --faint: #5d6379;
+  --panel: rgb(12 14 24 / 0.74);
+  --panel-solid: #0c0e18;
+  --line: rgb(255 255 255 / 0.08);
+  --line-strong: rgb(255 255 255 / 0.15);
+  --accent: #ff6b81;
+  --accent-2: #ffb36b;
+  --live: #4ade80;
+  --danger: #e8384f;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --spring: cubic-bezier(0.2, 1.4, 0.4, 1);
+
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-bg: var(--bg);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-accent-2: var(--accent-2);
+  --color-live: var(--live);
+  --color-danger: var(--danger);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --font-display: var(--font-instrument-serif);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+/* Entrance animations as theme tokens → real utilities, so responsive
+   variants work (e.g. `animate-sheet-up md:animate-slide-in`). */
+@theme {
+  --animate-rise: rise 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-pop: pop 0.38s cubic-bezier(0.2, 1.4, 0.4, 1) both;
+  --animate-fade: fade 0.35s ease both;
+  --animate-slide-in: slide-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-sheet-up: sheet-up 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--ink);
+  /* Was hard-coded to Arial, silently overriding the Geist font that the
+     layout loads. */
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+::selection {
+  background: rgb(255 107 129 / 0.35);
+}
+
+/* ───────────────────────── Surfaces & buttons ─────────────────────────
+   `glass` is a utility (so `md:glass` works); buttons live in the components
+   layer so utilities like `text-black` can still override them. Unlayered
+   rules would beat every Tailwind utility. */
+@utility glass {
+  background: var(--panel);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  backdrop-filter: blur(20px) saturate(140%);
+  border: 1px solid var(--line);
+  box-shadow:
+    0 24px 70px -24px rgb(0 0 0 / 0.75),
+    inset 0 1px 0 rgb(255 255 255 / 0.05);
+}
+
+@layer components {
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 9999px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition:
+    transform 0.15s ease,
+    background-color 0.2s ease,
+    box-shadow 0.25s ease,
+    opacity 0.2s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.btn:active {
+  transform: scale(0.96);
+}
+.btn:focus-visible,
+.icon-btn:focus-visible,
+.pulse-dot:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 3px;
+}
+.btn:disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #1b0b10;
+  box-shadow: 0 10px 34px -10px rgb(255 107 129 / 0.7);
+}
+.btn-primary:hover {
+  box-shadow: 0 12px 40px -8px rgb(255 140 110 / 0.85);
+}
+.btn-ghost {
+  background: rgb(255 255 255 / 0.06);
+  border: 1px solid var(--line);
+  color: var(--ink);
+}
+.btn-ghost:hover {
+  background: rgb(255 255 255 / 0.11);
+}
+.btn-danger {
+  background: var(--danger);
+  color: #fff;
+  box-shadow: 0 10px 30px -12px rgb(232 56 79 / 0.8);
+}
+.btn-danger:hover {
+  background: #f04a60;
+}
+
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  border-radius: 9999px;
+  color: var(--ink);
+  transition:
+    transform 0.15s ease,
+    background-color 0.2s ease,
+    color 0.2s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.icon-btn:active {
+  transform: scale(0.92);
+}
+.icon-btn:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+}
+
+/* ───────────────────────── Map markers ─────────────────────────
+   Mapbox positions a marker by writing `transform` on its root element, so
+   every animation lives on children — animating the root's transform (as
+   the old `.pulse-dot:hover { transform: scale() }` did) fights the map. */
+.pulse-marker {
+  width: 32px;
+  height: 32px;
+}
+
+.pulse-dot {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: none;
+  border-radius: 9999px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  animation: dot-in 0.7s var(--spring) both;
+}
+.pulse-dot.is-leaving {
+  animation: dot-out 0.45s ease forwards;
+  pointer-events: none;
+}
+
+.pulse-core {
+  width: 12px;
+  height: 12px;
+  border-radius: 9999px;
+  background: var(--c);
+  box-shadow:
+    0 0 0 2px rgb(5 6 11 / 0.85),
+    0 0 18px 4px color-mix(in srgb, var(--c) 55%, transparent);
+  transition:
+    transform 0.3s var(--spring),
+    filter 0.3s ease;
+}
+.pulse-dot:hover .pulse-core,
+.pulse-dot:focus-visible .pulse-core {
+  transform: scale(1.5);
+}
+
+/* Two staggered rings: a "lub-dub" heartbeat. */
+.pulse-ring {
+  position: absolute;
+  inset: 10px;
+  border-radius: 9999px;
+  border: 1.5px solid var(--c);
+  opacity: 0;
+  pointer-events: none;
+  animation: beat 2.4s cubic-bezier(0.2, 0.6, 0.3, 1) infinite;
+  animation-delay: var(--beat-delay, 0s);
+}
+.pulse-ring + .pulse-ring {
+  animation-delay: calc(var(--beat-delay, 0s) + 0.28s);
+}
+
+/* In a conversation: dimmed, no heartbeat, a slow dashed orbit. */
+.pulse-dot[data-busy="true"] {
+  cursor: not-allowed;
+}
+.pulse-dot[data-busy="true"] .pulse-core {
+  filter: saturate(0.3) brightness(0.7);
+  box-shadow: 0 0 0 2px rgb(5 6 11 / 0.85);
+}
+.pulse-dot[data-busy="true"] .pulse-ring {
+  display: none;
+}
+.pulse-dot[data-busy="true"]::after {
+  content: "";
+  position: absolute;
+  inset: 5px;
+  border-radius: 9999px;
+  border: 1.5px dashed color-mix(in srgb, var(--c) 55%, transparent);
+  animation: spin 8s linear infinite;
+}
+
+/* Gate preview: look alive, but not clickable before you've joined. */
+.pulse-dot[data-preview="true"] {
+  pointer-events: none;
+  cursor: default;
+}
+
+/* The person you're calling / who's calling you / who you're talking to. */
+.pulse-dot[data-highlight="true"] .pulse-core {
+  transform: scale(1.6);
+}
+.pulse-dot[data-highlight="true"] .pulse-ring {
+  animation-duration: 1.2s;
+}
+
+/* Waves. "in": they waved at you, so a little hand waves above their dot.
+   "out": you waved and are waiting, so their dot wears a soft amber halo.
+   Busy styling wins: someone in a conversation must never look available. */
+.pulse-dot[data-wave="in"]:not([data-busy="true"])::before {
+  content: "👋";
+  position: absolute;
+  top: -13px;
+  right: -9px;
+  font-size: 15px;
+  line-height: 1;
+  pointer-events: none;
+  filter: drop-shadow(0 2px 6px rgb(0 0 0 / 0.7));
+  transform-origin: 70% 85%;
+  animation: wave-hand 1.8s ease-in-out infinite;
+}
+.pulse-dot[data-wave="out"]:not([data-busy="true"]) .pulse-core {
+  box-shadow:
+    0 0 0 2px rgb(5 6 11 / 0.85),
+    0 0 0 4px color-mix(in srgb, var(--accent-2) 75%, transparent),
+    0 0 22px 6px color-mix(in srgb, var(--accent-2) 45%, transparent);
+}
+@keyframes wave-hand {
+  0%,
+  55%,
+  100% {
+    transform: rotate(0deg);
+  }
+  10%,
+  30% {
+    transform: rotate(18deg);
+  }
+  20%,
+  40% {
+    transform: rotate(-10deg);
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+.pulse-tip {
+  position: absolute;
+  bottom: calc(100% - 2px);
+  left: 50%;
+  transform: translate(-50%, 4px);
+  padding: 3px 9px;
+  border-radius: 9999px;
+  border: 1px solid var(--line);
+  background: rgb(12 14 24 / 0.92);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease;
+}
+.pulse-dot:hover .pulse-tip,
+.pulse-dot:focus-visible .pulse-tip {
+  opacity: 1;
+  transform: translate(-50%, 0);
 }
 
-/* Live user dots on the map */
-.pulse-dot {
+/* "You": where others see you (your offset dot, not your real location). */
+.pulse-me {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+}
+.pulse-me-halo {
+  position: absolute;
+  inset: -8px;
+  border-radius: 9999px;
+  background: radial-gradient(circle, rgb(255 150 120 / 0.38), transparent 68%);
+  animation: breathe 3.2s ease-in-out infinite;
+}
+.pulse-me-core {
+  position: relative;
   width: 14px;
   height: 14px;
   border-radius: 9999px;
-  border: 2px solid rgba(255, 255, 255, 0.9);
-  cursor: pointer;
-  padding: 0;
-  box-shadow: 0 0 0 rgba(255, 255, 255, 0.5);
-  animation: pulse-ring 2s ease-out infinite;
-  transition: transform 0.1s ease;
+  background: #fff;
+  box-shadow:
+    0 0 0 3px var(--accent),
+    0 0 26px 7px rgb(255 140 120 / 0.55);
+  animation: dot-in 0.9s var(--spring) both;
 }
-
-.pulse-dot:hover {
-  transform: scale(1.3);
-}
-
-/* The user's own "you are here" pin — small, sized like the dots. */
-.pulse-me {
-  position: relative;
-  font-size: 18px;
-  line-height: 1;
-  cursor: default;
-  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
-}
-
 .pulse-me-label {
   position: absolute;
-  bottom: 100%;
+  top: calc(100% - 4px);
   left: 50%;
   transform: translateX(-50%);
-  margin-bottom: 1px;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  border: 1px solid var(--line);
+  background: rgb(12 14 24 / 0.88);
+  color: var(--ink);
   font-size: 10px;
   font-weight: 700;
-  color: #ffffff;
-  background: rgba(0, 0, 0, 0.6);
-  padding: 0 5px;
-  border-radius: 9999px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
   white-space: nowrap;
 }
 
-@keyframes pulse-ring {
+/* Entry-globe greetings (lib/ambient.ts): pop up where a "message" lands,
+   drift up, fade. Animated on the inner span — Mapbox owns the root's
+   transform. */
+.pulse-greet {
+  display: block;
+  padding: 3px 9px;
+  border-radius: 9999px 9999px 9999px 4px;
+  border: 1px solid rgb(255 179 107 / 0.35);
+  background: rgb(12 14 24 / 0.85);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 6px 20px -8px rgb(255 140 110 / 0.6);
+  animation: greet 2.4s var(--ease-out) forwards;
+}
+@keyframes greet {
   0% {
-    box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.4);
+    opacity: 0;
+    transform: translateY(6px) scale(0.8);
   }
-  70% {
-    box-shadow: 0 0 0 8px rgba(255, 255, 255, 0);
+  12% {
+    opacity: 1;
+    transform: none;
+  }
+  75% {
+    opacity: 1;
+    transform: translateY(-6px);
   }
   100% {
-    box-shadow: 0 0 0 0 rgba(255, 255, 255, 0);
+    opacity: 0;
+    transform: translateY(-12px);
+  }
+}
+
+/* Mapbox chrome: keep the (required) logo + attribution, but quiet. */
+.mapboxgl-ctrl-bottom-left,
+.mapboxgl-ctrl-bottom-right {
+  margin-bottom: var(--safe-bottom);
+}
+.mapboxgl-ctrl-attrib.mapboxgl-compact {
+  background: rgb(12 14 24 / 0.7) !important;
+  color: var(--muted) !important;
+}
+.mapboxgl-ctrl-attrib a {
+  color: var(--muted) !important;
+}
+.mapboxgl-ctrl-attrib-button {
+  filter: invert(1) opacity(0.6);
+}
+
+/* ───────────────────────── Motion ───────────────────────── */
+@keyframes dot-in {
+  from {
+    opacity: 0;
+    transform: scale(0.2);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes dot-out {
+  to {
+    opacity: 0;
+    transform: scale(0.2);
+  }
+}
+@keyframes beat {
+  0% {
+    transform: scale(1);
+    opacity: 0.75;
+  }
+  60%,
+  100% {
+    transform: scale(3.4);
+    opacity: 0;
+  }
+}
+@keyframes breathe {
+  0%,
+  100% {
+    transform: scale(0.85);
+    opacity: 0.7;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(28px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes sheet-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: none;
+  }
+}
+@keyframes live-ping {
+  0% {
+    transform: scale(1);
+    opacity: 0.8;
+  }
+  80%,
+  100% {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+}
+/* Orb rings stay within ~1.7× so they fit inside the cards they sit in. */
+@keyframes orb-ping {
+  from {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  to {
+    transform: scale(1.7);
+    opacity: 0;
+  }
+}
+@keyframes typing {
+  0%,
+  80%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.35;
+  }
+  40% {
+    transform: translateY(-3px);
+    opacity: 1;
+  }
+}
+@keyframes drain {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+/* The wordmark's ECG sweep (Wordmark in ui.tsx). The 240 travelled here must
+   equal the dash pattern's period there ("100 140"), or the trace wraps. */
+@keyframes ecg {
+  from {
+    stroke-dashoffset: 120;
+  }
+  to {
+    stroke-dashoffset: -120;
+  }
+}
+
+.animate-live-ping {
+  animation: live-ping 1.8s ease-out infinite;
+}
+.animate-orb-ping {
+  animation: orb-ping 2.2s cubic-bezier(0.2, 0.6, 0.3, 1) infinite;
+}
+.animate-drain {
+  transform-origin: left;
+  animation: drain var(--drain-duration, 30s) linear forwards;
+}
+.typing-dot {
+  animation: typing 1.2s ease-in-out infinite;
+}
+.typing-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.typing-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+/* Gate copy (desktop): sits on the left margin; gateCamera() in WorldMap.tsx
+   puts the globe on the matching right margin and grows it to fill the
+   space between. Same numbers there — keep them in sync. */
+@media (min-width: 768px) {
+  .gate-copy {
+    margin-left: max(4rem, 8vw);
+  }
+}
+
+/* Gate → globe hand-off. */
+.gate {
+  transition:
+    opacity 0.7s ease,
+    transform 0.7s var(--ease-out);
+}
+.gate[data-leaving="true"] {
+  opacity: 0;
+  transform: translateY(10px);
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .pulse-ring,
+  .pulse-me-halo {
+    display: none;
   }
 }

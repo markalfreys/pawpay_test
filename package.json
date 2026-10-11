@@ -8,13 +8,15 @@
     "build": "prisma generate && next build",
     "start": "next start",
     "lint": "eslint",
-    "test:e2e": "node e2e/two-users.mjs"
+    "test:e2e": "node e2e/two-users.mjs",
+    "test:security": "node e2e/api-security.mjs"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
+    "lucide-react": "^1.55.0",
     "mapbox-gl": "^3.24.0",
-    "next": "16.2.7",
+    "next": "16.3.8",
     "pg": "^8.21.0",
     "react": "19.2.4",
     "react-dom": "19.2.4"
@@ -27,7 +29,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.2.7",
+    "eslint-config-next": "16.3.8",
     "playwright-core": "^1.55.0",
     "prisma": "^7.8.0",
     "tailwindcss": "^4",

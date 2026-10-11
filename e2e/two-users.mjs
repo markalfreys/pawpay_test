@@ -8,13 +8,18 @@
 //
 // Set CHROME_PATH to use a specific Chrome/Chromium binary.
 //
-// Note: run it against a database no *old* build of the app is also using —
-// the original heartbeat bug refreshed every row, so an old deployment on the
-// same DB keeps every dot alive and the crash check will (correctly) fail.
+// Run it against a quiet database:
+// - other people online nearby change what the map frames (it frames your
+//   nearest cluster), so the auto-framing check assumes A and B are alone;
+// - an *old* build of the app on the same DB keeps every dot alive (the
+//   original heartbeat bug refreshed every row), so the crash check fails.
 import { chromium } from "playwright-core";
 
 const BASE = process.argv[2] ?? "http://localhost:3000";
 const results = [];
+// Uncaught exceptions in any page. A production build only logs them to the
+// console (no dev overlay), so collect them and fail at the end.
+const pageErrors = [];
 const t0 = Date.now();
 const ts = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
 
@@ -49,6 +54,7 @@ async function user(name, latitude, longitude) {
     viewport: { width: 1280, height: 800 },
   });
   const page = await ctx.newPage();
+  page.on("pageerror", (e) => pageErrors.push(`${name}: ${e.message}`));
   const u = { name, ctx, page, id: null };
   // Learn this user's public session id from the join call.
   page.on("response", async (r) => {
@@ -65,13 +71,17 @@ async function user(name, latitude, longitude) {
 
 async function enter(u) {
   await u.page.goto(BASE, { waitUntil: "load" });
+  const live = u.page.locator('main[data-phase="live"]');
   // Retry in case the first click lands before hydration attaches the handler.
-  for (let i = 0; i < 5; i++) {
-    const btn = u.page.getByRole("button", { name: /enter/i }).first();
-    if (!(await btn.isVisible().catch(() => false))) break;
-    await btn.click().catch(() => {});
-    await u.page.waitForTimeout(1500);
+  for (let i = 0; i < 5 && !(await live.count()); i++) {
+    await u.page
+      .getByRole("button", { name: /enter pulse/i })
+      .first()
+      .click({ timeout: 3_000 })
+      .catch(() => {});
+    await live.waitFor({ timeout: 4_000 }).catch(() => {});
   }
+  if (!(await live.count())) throw new Error("never left the entry screen");
   await u.page.waitForSelector(".mapboxgl-canvas", { timeout: 20_000 });
   for (let i = 0; i < 50 && !u.id; i++) await u.page.waitForTimeout(100);
   if (!u.id) throw new Error("no session id observed");
@@ -122,17 +132,32 @@ const text = (u, re, timeout = 15_000) =>
 
 const chatInput = (u) => u.page.getByPlaceholder(/message/i).first();
 
-async function connect(a, b) {
-  await waitForMarker(a, b.id);
-  // Dispatch directly: the dot may be off-screen at the current zoom.
-  await marker(a, b.id).dispatchEvent("click");
-  await text(b, /wants to connect/i);
-  await b.page.getByRole("button", { name: /^accept$/i }).first().click();
+// A card that appears on its own (a wave arriving) ignores clicks this long
+// (ARM_MS in PeerCard.tsx), like a person's first glance at it.
+const CARD_ARM_MS = 700;
+
+// Chat panel open and the data channel up (input enabled) on both sides.
+async function chatOpens(a, b) {
   await Promise.all([chatInput(a).waitFor({ timeout: 20_000 }), chatInput(b).waitFor({ timeout: 20_000 })]);
   await Promise.all([
     a.page.waitForFunction(() => !document.querySelector("input[disabled]"), null, { timeout: 20_000 }),
     b.page.waitForFunction(() => !document.querySelector("input[disabled]"), null, { timeout: 20_000 }),
   ]);
+}
+
+// Tapping a dot opens its card ("Wave" / "Ask to chat").
+async function openCard(a, b) {
+  await waitForMarker(a, b.id);
+  // Dispatch directly: the dot may be off-screen at the current zoom.
+  await marker(a, b.id).dispatchEvent("click");
+}
+
+async function connect(a, b) {
+  await openCard(a, b);
+  await a.page.getByRole("button", { name: /^ask to chat$/i }).first().click();
+  await text(b, /wants to connect/i);
+  await b.page.getByRole("button", { name: /^accept$/i }).first().click();
+  await chatOpens(a, b);
 }
 
 async function send(u, msg) {
@@ -166,6 +191,11 @@ try {
     await step("both dots marked busy while chatting", async () => {
       await waitBusy(A, B.id, true);
       await waitBusy(B, A.id, true);
+    });
+    await step("typing indicator shows on the other side", async () => {
+      await chatInput(A).pressSequentially("hel");
+      await B.page.getByLabel("Stranger is typing").waitFor({ timeout: 5_000 });
+      await chatInput(A).fill("");
     });
     await step("chat A → B delivered", async () => {
       await send(A, "hello from A");
@@ -214,10 +244,85 @@ try {
       await A.page.getByRole("button", { name: /^end( chat)?$/i }).first().click();
       await chatInput(B).waitFor({ state: "detached", timeout: 10_000 });
     });
+    // B's transcript stays readable until B dismisses it (if the UI keeps it).
+    await step("B's ended chat can be dismissed", async () => {
+      const back = B.page.getByRole("button", { name: /back to the globe/i });
+      if (await back.count()) {
+        await text(B, "hello from A", 2_000);
+        await back.click();
+        await back.waitFor({ state: "detached", timeout: 3_000 });
+      }
+    });
     await step("after ending, both dots available again", async () => {
       await waitBusy(A, B.id, false);
       await waitBusy(B, A.id, false);
     });
+
+    // Waves: a quiet hello. B gets no prompt; waving back connects at once.
+    const waved = await step("A waves at B → B sees it, with no prompt", async () => {
+      await openCard(A, B);
+      await A.page.getByRole("button", { name: /^wave$/i }).first().click();
+      await text(B, /someone waved at you/i);
+      await B.page.locator(`[data-peer-id="${A.id}"][data-wave="in"]`).waitFor({ timeout: 5_000 });
+      if (await B.page.getByText(/wants to connect/i).count()) throw new Error("B got a connection prompt");
+    });
+    if (waved) {
+      // Regression: "No thanks" used to leave A stuck on "You waved", and
+      // B's side ignored A's waves for the rest of the session.
+      await step("B says no thanks → A's wave clears, and A can wave again", async () => {
+        await B.page.waitForTimeout(CARD_ARM_MS);
+        await B.page.getByRole("button", { name: /^no thanks$/i }).first().click();
+        await A.page.locator(`[data-peer-id="${B.id}"][data-wave=""]`).waitFor({ timeout: 10_000 });
+        await openCard(A, B);
+        await A.page.getByRole("button", { name: /^wave$/i }).first().click();
+        await text(B, /someone waved at you/i);
+      });
+      await step("B waves back → chat opens on both, nobody has to accept", async () => {
+        await B.page.waitForTimeout(CARD_ARM_MS);
+        await B.page.getByRole("button", { name: /^wave back$/i }).first().click();
+        await chatOpens(A, B);
+        await text(A, /you both waved/i, 5_000);
+        await text(B, /you both waved/i, 5_000);
+      });
+      await step("chat after waving", async () => {
+        await send(B, "hi, wave friend");
+        await text(A, "hi, wave friend", 5_000);
+      });
+      await step("B ends the wave chat → both available again", async () => {
+        await B.page.getByRole("button", { name: /^end( chat)?$/i }).first().click();
+        await chatInput(A).waitFor({ state: "detached", timeout: 10_000 });
+        await waitBusy(A, B.id, false);
+        await waitBusy(B, A.id, false);
+      });
+      // Regression: A's ended transcript is still up. Tapping a dot used to
+      // open a card hidden behind it, so nothing seemed to happen.
+      await step("tapping a dot from an ended chat opens its card", async () => {
+        await openCard(A, B);
+        await A.page.getByRole("button", { name: /^ask to chat$/i }).first().waitFor({ timeout: 5_000 });
+        await A.page.getByRole("button", { name: /^close$/i }).first().click();
+      });
+    }
+
+    // Regression: two requests crossing used to decline each other, so
+    // nobody got a chat although both asked.
+    const crossed = await step("A and B ask each other at the same moment → chat opens", async () => {
+      await Promise.all([openCard(A, B), openCard(B, A)]);
+      await Promise.all([
+        A.page.getByRole("button", { name: /^ask to chat$/i }).first().click(),
+        B.page.getByRole("button", { name: /^ask to chat$/i }).first().click(),
+      ]);
+      await chatOpens(A, B);
+    });
+    if (crossed) {
+      await step("end the crossed chat → both available again", async () => {
+        await A.page.getByRole("button", { name: /^end( chat)?$/i }).first().click();
+        await chatInput(B).waitFor({ state: "detached", timeout: 10_000 });
+        const back = B.page.getByRole("button", { name: /back to the globe/i });
+        if (await back.count()) await back.click();
+        await waitBusy(A, B.id, false);
+        await waitBusy(B, A.id, false);
+      });
+    }
     if (await step("reconnect after ending works", () => connect(A, B))) {
       await step("chat after reconnect", async () => {
         await send(B, "round two");
@@ -239,6 +344,10 @@ try {
     await C.ctx.setOffline(true); // so neither the pagehide beacon nor a poll gets out
     await C.ctx.close();
     await waitForMarker(A, C.id, false, 30_000);
+  });
+
+  await step("no uncaught errors in any page", async () => {
+    if (pageErrors.length) throw new Error(`${pageErrors.length} error(s): ${pageErrors.slice(0, 3).join(" | ")}`);
   });
 } finally {
   await browser.close();

@@ -12,10 +12,13 @@ datasource db {
 }
 
 model Presence {
-  id       String   @id // client-generated session uuid
+  id       String   @id // public session id: a hash of the client's secret key (lib/session.ts)
   lat      Float // ALREADY privacy-offset coords (raw is never stored)
   lng      Float
   busy     Boolean  @default(false) // true while in an active connection
+  // Who this session is linked to: the person it is calling (request pending)
+  // or talking to (busy). /api/signal only relays messages that fit this link.
+  peerId   String?
   lastSeen DateTime
 
   @@index([lastSeen])
@@ -24,8 +27,8 @@ model Presence {
 model Signal {
   // Mailbox for connection requests + WebRTC signaling only.
   id        String   @id @default(uuid())
-  toId      String // recipient session id
-  fromId    String // sender session id
+  toId      String // recipient public session id
+  fromId    String // sender public session id (set by the server, never the client)
   type      String // request | accept | decline | offer | answer | ice | end
   payload   String? // JSON string (SDP / ICE candidate)
   createdAt DateTime @default(now())

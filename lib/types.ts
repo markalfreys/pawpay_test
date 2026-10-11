@@ -8,10 +8,16 @@ export type SignalType =
   | "offer" // WebRTC SDP offer
   | "answer" // WebRTC SDP answer
   | "ice" // WebRTC ICE candidate
-  | "end"; // hang up / leave the connection
+  | "end" // hang up / leave the connection
+  | "wave" // a quiet hello: no prompt; waving back connects (see app/page.tsx)
+  | "unwave"; // the wave between us is off: taken back, or "No thanks"
+
+// A wave in flight with one peer: "out" = we waved at them, "in" = they
+// waved at us.
+export type WaveDir = "in" | "out";
 
 export interface PeerDot {
-  id: string;
+  id: string; // public session id — safe to share, can't be used to act as them
   lat: number;
   lng: number;
   busy: boolean;
@@ -24,6 +30,12 @@ export interface SignalMsg {
   type: SignalType;
   payload: string | null;
   createdAt: string;
+}
+
+// Pre-join preview of the globe (anonymous: no ids).
+export interface GlobeResponse {
+  online: number;
+  peers: { lat: number; lng: number; busy: boolean }[];
 }
 
 export interface PollResponse {
