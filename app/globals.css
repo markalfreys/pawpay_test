@@ -533,6 +533,8 @@ body {
     transform: scaleX(0);
   }
 }
+/* The wordmark's ECG sweep (Wordmark in ui.tsx). The 240 travelled here must
+   equal the dash pattern's period there ("100 140"), or the trace wraps. */
 @keyframes ecg {
   from {
     stroke-dashoffset: 120;

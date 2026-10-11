@@ -41,8 +41,18 @@ export function Orb({
   );
 }
 
+// The ECG trace, inset 1.5 units at each end so the round caps (radius 1.2)
+// stay inside the 44-wide viewBox instead of being clipped.
+const ECG_PATH = "M1.5 11h9.5l3-8 5 15 4-11 2.5 4H42.5";
+
 // "Pulse" set in the display serif, with an ECG trace that sweeps like a
 // monitor — the brand in one glance.
+//
+// The sweep is one dash, 100 long (pathLength), slid from offset 120 to -120
+// by the `ecg` keyframes: drawn in, held, wiped out, then a beat of nothing.
+// The gap has to be 140 so the pattern repeats every 240, the full distance
+// travelled. With a 100 gap the next dash wrapped round early, so a second
+// trace started drawing in at the end of each loop and got cut off.
 export function Wordmark({ size = "sm" }: { size?: "sm" | "lg" }) {
   const id = useId();
   const lg = size === "lg";
@@ -62,7 +72,7 @@ export function Wordmark({ size = "sm" }: { size?: "sm" | "lg" }) {
           </linearGradient>
         </defs>
         <path
-          d="M1 11h10l3-8 5 15 4-11 2.5 4H43"
+          d={ECG_PATH}
           fill="none"
           stroke={`url(#${id})`}
           strokeOpacity="0.25"
@@ -71,14 +81,14 @@ export function Wordmark({ size = "sm" }: { size?: "sm" | "lg" }) {
           strokeLinejoin="round"
         />
         <path
-          d="M1 11h10l3-8 5 15 4-11 2.5 4H43"
+          d={ECG_PATH}
           fill="none"
           stroke={`url(#${id})`}
           strokeWidth="2.4"
           strokeLinecap="round"
           strokeLinejoin="round"
           pathLength={100}
-          strokeDasharray="100 100"
+          strokeDasharray="100 140"
           style={{ animation: "ecg 2.6s cubic-bezier(.45,0,.55,1) infinite" }}
         />
       </svg>
