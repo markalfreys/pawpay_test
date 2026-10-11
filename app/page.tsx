@@ -55,7 +55,9 @@ export default function Home() {
   const [gateMounted, setGateMounted] = useState(true);
   const [preview, setPreview] = useState<PeerDot[]>([]);
   const [previewOnline, setPreviewOnline] = useState<number | null>(null);
-  const [sessionId] = useState(() => crypto.randomUUID());
+  // This tab's secret session key: our credential for every API call. Others
+  // only ever see the public id the server derives from it.
+  const [sessionKey] = useState(() => crypto.randomUUID());
   const [peers, setPeers] = useState<PeerDot[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [ended, setEnded] = useState<{ peerId: string; reason: string } | null>(null);
@@ -153,7 +155,7 @@ export default function Home() {
   function teardown({ notice, notifyPeer = false, keepTranscript }: EndOptions = {}) {
     const c = connRef.current;
     if (notifyPeer && c.kind !== "idle") {
-      void sendSignal(sessionId, c.peerId, "end");
+      void sendSignal(sessionKey, c.peerId, "end");
     }
     clearConnTimer();
     clearVideoTimer();
@@ -189,7 +191,7 @@ export default function Home() {
   function startPeer(peerId: string, initiator: boolean) {
     const ps = new PeerSession(initiator, {
       onSignal: (type: DescType, payload: string) => {
-        void sendSignal(sessionId, peerId, type, payload);
+        void sendSignal(sessionKey, peerId, type, payload);
       },
       onChat: (text) => {
         if (typingTimer.current) clearTimeout(typingTimer.current);
@@ -282,7 +284,7 @@ export default function Home() {
     freshConversation();
     setHasTapped(true);
     setConn({ kind: "requesting", peerId });
-    void sendSignal(sessionId, peerId, "request");
+    void sendSignal(sessionKey, peerId, "request");
     clearConnTimer();
     connTimer.current = setTimeout(() => {
       if (
@@ -303,14 +305,14 @@ export default function Home() {
     const peerId = connRef.current.peerId;
     freshConversation();
     startPeer(peerId, false);
-    void sendSignal(sessionId, peerId, "accept");
+    void sendSignal(sessionKey, peerId, "accept");
     setConn({ kind: "connecting", peerId });
     armConnectTimeout(peerId);
   }
 
   function declineIncoming() {
     if (connRef.current.kind !== "incoming") return;
-    void sendSignal(sessionId, connRef.current.peerId, "decline");
+    void sendSignal(sessionKey, connRef.current.peerId, "decline");
     setConn({ kind: "idle" });
   }
 
@@ -418,7 +420,7 @@ export default function Home() {
         if (connRef.current.kind === "idle") {
           setConn({ kind: "incoming", peerId: sig.fromId });
         } else {
-          void sendSignal(sessionId, sig.fromId, "decline");
+          void sendSignal(sessionKey, sig.fromId, "decline");
         }
         break;
       }
@@ -478,7 +480,7 @@ export default function Home() {
     if (!data.present && locationRef.current && !rejoining.current) {
       rejoining.current = true;
       const { lat, lng } = locationRef.current;
-      join(sessionId, lat, lng)
+      join(sessionKey, lat, lng)
         .then(setPublicMe)
         .catch(() => {})
         .finally(() => {
@@ -540,13 +542,13 @@ export default function Home() {
   }, [phase]);
 
   useEffect(() => {
-    if (phase !== "live" || !sessionId) return;
+    if (phase !== "live" || !sessionKey) return;
     let active = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     const tick = async () => {
       try {
-        const data = await poll(sessionId);
+        const data = await poll(sessionKey);
         if (!active) return;
         handlePollRef.current(data);
       } catch {}
@@ -562,18 +564,18 @@ export default function Home() {
       active = false;
       if (timer) clearTimeout(timer);
     };
-  }, [phase, sessionId]);
+  }, [phase, sessionKey]);
 
   useEffect(() => {
-    if (!sessionId || phase !== "live") return;
-    const onLeave = () => leave(sessionId);
+    if (!sessionKey || phase !== "live") return;
+    const onLeave = () => leave(sessionKey);
     window.addEventListener("pagehide", onLeave);
     window.addEventListener("beforeunload", onLeave);
     return () => {
       window.removeEventListener("pagehide", onLeave);
       window.removeEventListener("beforeunload", onLeave);
     };
-  }, [sessionId, phase]);
+  }, [sessionKey, phase]);
 
   // Someone's asking (to connect, or to start video): chime, buzz on phones,
   // and flag the tab title in case Pulse is in a background tab.
@@ -592,7 +594,7 @@ export default function Home() {
   // Throws if the server can't be reached, so the gate can show an error
   // instead of dropping the user onto a map where nothing works.
   async function handleReady(lat: number, lng: number) {
-    const pub = await join(sessionId, lat, lng);
+    const pub = await join(sessionKey, lat, lng);
     locationRef.current = { lat, lng };
     setPublicMe(pub);
     setPhase("live");

@@ -1,16 +1,19 @@
 // Privacy offset: move a real coordinate 1–3 km in a random direction so the
-// dot is placed *near* the user, never at their exact location. A fresh random
-// offset is generated each session (this runs once per join), so the same user
-// lands somewhere different every time.
+// dot is placed *near* the user, never at their exact location. The randomness
+// comes from `seed` (two numbers in [0, 1), from offsetSeed() in
+// lib/session.ts): different for every session, so the same user lands
+// somewhere different every time, but fixed within a session, so re-joins
+// don't hand out fresh samples to average.
 
 const KM_PER_DEG_LAT = 111.32;
 
 export function applyPrivacyOffset(
   lat: number,
   lng: number,
+  seed: [number, number],
 ): { lat: number; lng: number } {
-  const distanceKm = 1 + Math.random() * 2; // 1–3 km
-  const bearing = Math.random() * 2 * Math.PI; // random direction
+  const distanceKm = 1 + seed[0] * 2; // 1–3 km
+  const bearing = seed[1] * 2 * Math.PI; // random direction
 
   const dLat = (distanceKm * Math.cos(bearing)) / KM_PER_DEG_LAT;
   const latRad = (lat * Math.PI) / 180;

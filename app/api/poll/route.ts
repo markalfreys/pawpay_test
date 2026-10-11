@@ -1,6 +1,8 @@
 import { after, type NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { STALE_MS, SIGNAL_TTL_MS, REAP_INTERVAL_MS } from "@/lib/presence";
+import { clientIp, LIMITS, rateLimit } from "@/lib/ratelimit";
+import { getSession, unauthorized } from "@/lib/session";
 import type { PollResponse } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -18,20 +20,24 @@ type SignalRow = {
 // Per-instance throttle for garbage collection (see reap()).
 let lastReapAt = 0;
 
-// GET /api/poll?id= — the single endpoint that drives the live map.
-// It (1) heartbeats the caller, (2) returns the filtered online peers, and
-// (3) drains this user's mailbox. Stale rows are garbage-collected after the
-// response is sent.
+// GET /api/poll — Authorization: Bearer <key>. The single endpoint that
+// drives the live map. It (1) heartbeats the caller, (2) returns the filtered
+// online peers, and (3) drains this user's mailbox. Stale rows are
+// garbage-collected after the response is sent.
+//
+// The caller is identified by their secret key. It used to be `?id=`, the
+// same public id every peer receives below, so anyone could drain anyone's
+// mailbox and intercept their connection requests and SDP.
 //
 // The three queries are independent, so they run concurrently: one database
 // round trip per poll instead of five sequential ones.
 export async function GET(request: NextRequest) {
-  const params = request.nextUrl.searchParams;
-  const id = params.get("id");
+  const limited = rateLimit(`poll:${clientIp(request)}`, ...LIMITS.poll);
+  if (limited) return limited;
 
-  if (!id) {
-    return Response.json({ error: "missing id" }, { status: 400 });
-  }
+  const session = getSession(request);
+  if (!session) return unauthorized();
+  const id = session.id;
 
   const now = Date.now();
   const staleCutoff = new Date(now - STALE_MS);

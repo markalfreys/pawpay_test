@@ -11,7 +11,7 @@ export type SignalType =
   | "end"; // hang up / leave the connection
 
 export interface PeerDot {
-  id: string;
+  id: string; // public session id — safe to share, can't be used to act as them
   lat: number;
   lng: number;
   busy: boolean;
